@@ -12,8 +12,7 @@ def main_keyboard():
         text='Подробнее 📲'
     )
     keyboard.button(
-        text='Настройки ⚙️',
-        style='red'
-    )
+        text='Настройки ⚙️'
+        )
     keyboard.adjust(1, 2)
     return keyboard.as_markup(resize_keyboard=True)

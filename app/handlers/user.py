@@ -16,5 +16,4 @@ async def welcome(message: Message, command: CommandObject):
 Выберите нужное действие в меню ниже 👇"""
     
     await message.answer(hello_message, reply_markup=main_keyboard())
-    
                     
