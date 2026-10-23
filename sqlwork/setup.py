@@ -1,5 +1,6 @@
 from .connection import get_connection
 
+# Создание таблицы
 def create_table():
     with get_connection() as conn:
         cursor = conn.cursor()

@@ -16,3 +16,16 @@ def main_keyboard():
         )
     keyboard.adjust(1, 2)
     return keyboard.as_markup(resize_keyboard=True)
+
+def privilege_keyboard():
+    keyboard = ReplyKeyboardBuilder()
+
+    keyboard.button(
+        text='Закрепить 📌'
+    )
+
+    keyboard.button(
+        text='Без привилегий ❌'
+    )
+    keyboard.adjust(2)
+    return keyboard.as_markup(resize_keyboard=True)

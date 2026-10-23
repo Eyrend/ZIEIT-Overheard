@@ -4,6 +4,7 @@ from aiogram.types import TelegramObject
 from sqlwork.user import get_user, create_user
 from config import ADMIN_IDS
 
+# Получение данных о пользователе 
 class UserMiddleWare(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user_id = event.from_user.id

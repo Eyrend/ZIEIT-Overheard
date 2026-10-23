@@ -1,4 +1,4 @@
-
+# Файл который инциализирует работу бота
 from config import BOT_TOKEN
 import asyncio
 from aiogram import Bot, Dispatcher

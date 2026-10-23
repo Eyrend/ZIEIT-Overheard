@@ -1,6 +1,6 @@
 from .connection import get_connection
 
-
+# Создание юзера в таблице 
 def create_user(telegram_id, name, is_banned):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -22,6 +22,7 @@ def create_user(telegram_id, name, is_banned):
         cursor.execute(insert_query, data)
         conn.commit()
 
+# Получение информации о юзере по айди
 def get_user(telegram_id):
     with get_connection() as conn:
         cursor = conn.cursor()
