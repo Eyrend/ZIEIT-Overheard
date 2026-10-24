@@ -40,7 +40,7 @@ async def choose_duration(
         key in data for key in ("chat_id", "message_id", "user_id")
     ):
         await callback.answer(
-            "Не удалось найти исходный пост. Отправь его заново.",
+            "Не удалось найти исходный пост",
             show_alert=True,
         )
         await state.clear()
@@ -71,8 +71,6 @@ async def choose_duration(
         f"IBAN:\n<code>{IBAN}</code>\n\n"
         "Переведи указанную сумму на этот счёт.\n"
         "После перевода отправь сюда фотографию чека.\n\n"
-        "До отправки чека ты не сможешь пользоваться "
-        "остальными функциями бота.\n\n"
         "Отменить заказ можно кнопкой ниже.\n"
         "Отправленный чек будет проверен модераторами."
     )
@@ -99,7 +97,7 @@ async def receive_payment_photo(
 
     if order_id is None:
         await message.answer(
-            "Не удалось найти заказ. Обратись к модератору."
+            "Не удалось найти заказ."
         )
         return
 
@@ -132,21 +130,21 @@ async def receive_payment_photo(
 
 
     try:
-        # 1. Пересылаем исходный пост пользователя.
+        # 1. Пересылаем исходный пост пользователя
         await bot.forward_message(
             chat_id=MODERATION_GROUP_ID,
             from_chat_id=order["post_chat_id"],
             message_id=order["post_message_id"],
         )
 
-        # 2. Отправляем фотографию чека.
+        # 2. Отправляем фотографию чека
         await bot.send_photo(
             chat_id=MODERATION_GROUP_ID,
             photo=photo_file_id,
             caption=f"🧾 Чек по заказу №{order_id}",
         )
 
-        # 3. Отправляем информацию для модераторов.
+        # 3. Отправляем информацию для модераторов
         await bot.send_message(
             chat_id=MODERATION_GROUP_ID,
             text=(
@@ -181,7 +179,7 @@ async def receive_payment_photo(
 @router.message(PostStates.waiting_for_pay)
 async def payment_requires_photo(message: Message):
     await message.answer(
-        "Сейчас ожидаю фотографию чека.\n"
+        "Ожидаю фотографию чека.\n"
         "Отправь её как фото или нажми «Отменить оплату» "
         "под сообщением с реквизитами."
     )

@@ -10,8 +10,10 @@ def main_keyboard():
     keyboard = ReplyKeyboardBuilder()
     keyboard.button(text="Предложить пост 🗒️")
     keyboard.button(text="Подробнее 📲")
-    keyboard.button(text="Настройки ⚙️")
-    keyboard.adjust(1, 2)
+    # keyboard.button(text="Настройки ⚙️")
+    keyboard.button(text='Условия возврата ⛓️')
+    keyboard.button(text='Поддержка 🛟')
+    keyboard.adjust(1, 2, 1)
     return keyboard.as_markup(resize_keyboard=True)
 
 

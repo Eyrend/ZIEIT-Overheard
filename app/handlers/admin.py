@@ -17,7 +17,7 @@ async def ban_command(message: Message, bot: Bot, is_admin: bool):
 
     if len(arguments) < 2:
         await message.answer(
-            "Использование:\n"
+            "❗️ Использование:\n"
             "/ban ID [время] [причина]\n"
             "/ban ID причина — бессрочно"
         )
@@ -26,7 +26,7 @@ async def ban_command(message: Message, bot: Bot, is_admin: bool):
     try:
         user_id = int(arguments[1])
     except ValueError:
-        await message.answer("Некорректный ID")
+        await message.answer("❗️ Некорректный ID")
         return
 
     user_data = get_user(user_id)
@@ -54,7 +54,7 @@ async def ban_command(message: Message, bot: Bot, is_admin: bool):
         duration = parse_duration(arguments[2])
 
         if duration is None:
-            await message.answer("Неверная длительность. Используйте 30m, 1h или 1d.")
+            await message.answer("❗️Неверная длительность. Используйте 30m, 1h или 1d.")
             return
 
         reason = arguments[3]
@@ -75,7 +75,7 @@ async def ban_command(message: Message, bot: Bot, is_admin: bool):
         await bot.send_message(
             chat_id=user_id,
             text=(
-                f"Вы были забанены.\n"
+                f"💔 Вы были забанены.\n"
                 f"Причина: {reason or 'не указана'}"
             )
         )
@@ -91,12 +91,12 @@ async def unban_command(message: Message, is_admin: bool, user):
         return
     arguments = message.text.split()
     if len(arguments) != 2:
-        await message.answer("Использование: /unban ID")
+        await message.answer("❗️Использование: /unban ID")
         return
     user_id = arguments[1]
     user_data = get_user(user_id)
     if user_data['is_banned'] == 0:
-        await message.answer(f"Пользователь {user_id} не забанен")
+        await message.answer(f"❗️ Пользователь {user_id} не забанен")
         return
 
     try:
@@ -111,3 +111,44 @@ async def unban_command(message: Message, is_admin: bool, user):
     
     unban_user(user_id)
     await message.answer(f"Пользователь {user_id} разбанен")
+
+@router.message(Command("reply"), F.chat.id == MODERATION_GROUP_ID)
+async def reply_to_user(message: Message, bot: Bot, is_admin: bool):
+    if not is_admin:
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+
+    if len(args) < 3:
+        await message.answer(
+            "Использование:\n"
+            "/reply ID сообщение\n\n"
+            "Пример:\n"
+            "/reply 123456789 Здравствуйте! Чем можем помочь?"
+        )
+        return
+
+    try:
+        user_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID пользователя должен быть числом.")
+        return
+
+    reply_text = args[2].strip()
+
+    if not reply_text:
+        await message.answer("❌ Напиши текст ответа.")
+        return
+
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"💬 Ответ поддержки:\n\n{reply_text}",
+        )
+        await message.answer(f"✅ Ответ пользователю {user_id} отправлен.")
+
+    except Exception:
+        await message.answer(
+            f"❌ Не удалось отправить сообщение пользователю {user_id}. "
+            "Возможно, он не запускал бота или заблокировал его."
+        )

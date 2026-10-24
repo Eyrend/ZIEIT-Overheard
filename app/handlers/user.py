@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from fsm import PostStates
 from keyboards import main_keyboard, privilege_keyboard, set_time_kb
 from aiogram.types import ReplyKeyboardRemove
-from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT
+from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT, MORE, REFUND
 from config import MODERATION_GROUP_ID
 router = Router()
 
@@ -69,11 +69,54 @@ async def no_privileges(
     PostStates.choosing_privilege,
 )
 async def pin_post(message: Message, state: FSMContext):
-    # Исходный пост уже сохранён в receive_post().
-    # Не перезаписываем его ID сообщением с кнопкой.
     await state.set_state(PostStates.waiting_for_duration)
 
     await message.answer(
         text=SET_TIME_TEXT,
         reply_markup=set_time_kb(),
     )
+
+@router.message(F.text == 'Подробнее 📲')
+async def send_more(message: Message):
+    await message.answer(MORE)
+
+@router.message(F.text == 'Условия возврата ⛓️')
+async def send_more(message: Message):
+    await message.answer(REFUND)
+
+@router.message(F.text == "Поддержка 🛟")
+async def support(message: Message, state: FSMContext):
+    await state.set_state(PostStates.support_message)
+    await message.answer("🛟 Напиши своё обращение. Оно будет отправлено администрации.")
+
+
+@router.message(PostStates.support_message)
+async def receive_support_message(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+):
+    user = message.from_user
+
+    await bot.send_message(
+        chat_id=MODERATION_GROUP_ID,
+        text=(
+            "🛟 ОБРАЩЕНИЕ В ПОДДЕРЖКУ\n\n"
+            f"👤 Пользователь: {user.full_name}\n"
+            f"🆔 Telegram ID: {user.id}\n"
+            f"🔗 Username: @{user.username if user.username else 'отсутствует'}"
+        ),
+    )
+
+    await bot.forward_message(
+        chat_id=MODERATION_GROUP_ID,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+    )
+
+    await message.answer(
+        "✅ Обращение отправлено!",
+        reply_markup=main_keyboard(),
+    )
+    await state.clear()
+
