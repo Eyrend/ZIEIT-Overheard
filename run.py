@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from middleware import UserMiddleWare
 from sqlwork.setup import create_table, add_ban_reason_column
 from app.handlers import router
+from sqlwork.orders import init_orders_table
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -12,6 +13,7 @@ dp = Dispatcher()
 async def main():
     create_table()
     add_ban_reason_column()
+    init_orders_table()
     router.message.middleware(UserMiddleWare())
     dp.include_router(router)
     await dp.start_polling(bot)

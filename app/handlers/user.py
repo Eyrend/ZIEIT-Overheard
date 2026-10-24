@@ -3,9 +3,9 @@ from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from fsm import PostStates
-from keyboards import main_keyboard, privilege_keyboard
+from keyboards import main_keyboard, privilege_keyboard, set_time_kb
 from aiogram.types import ReplyKeyboardRemove
-from message_text import WELCOME_MESSAGE, RECIEVED_POST
+from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT
 from config import MODERATION_GROUP_ID
 router = Router()
 
@@ -23,21 +23,23 @@ async def suggest_post(message: Message, state: FSMContext):
     await state.set_state(PostStates.waiting_for_post)
     await message.answer("Отправь пост", reply_markup=ReplyKeyboardRemove())
 
-
 @router.message(PostStates.waiting_for_post)
 async def receive_post(message: Message, state: FSMContext):
-    # Установка данных для состояния
+    if message.text and message.text.startswith("/"):
+        await message.answer("Отправьте пост")
+        return
+
     await state.update_data(
         chat_id=message.chat.id,
         message_id=message.message_id,
-        user_id=message.from_user.id
+        user_id=message.from_user.id,
     )
 
-
     await state.set_state(PostStates.choosing_privilege)
+
     await message.answer(
-        "Выбери привилегию:",
-        reply_markup=privilege_keyboard()
+        "Выбери вариант публикации:",
+        reply_markup=privilege_keyboard(),
     )
 
 
@@ -64,12 +66,14 @@ async def no_privileges(
 
 @router.message(
     F.text == "Закрепить 📌",
-    PostStates.choosing_privilege
+    PostStates.choosing_privilege,
 )
-async def pin_post(message: Message):
+async def pin_post(message: Message, state: FSMContext):
+    # Исходный пост уже сохранён в receive_post().
+    # Не перезаписываем его ID сообщением с кнопкой.
+    await state.set_state(PostStates.waiting_for_duration)
+
     await message.answer(
-        "Отправьте на какое количество времени вы хотите закрепить пост:" \
-        "6 часов – 20 ⭐️" \
-        "12 часов – 20 ⭐️" \
-        "24 часов – 30 ⭐️"
+        text=SET_TIME_TEXT,
+        reply_markup=set_time_kb(),
     )
