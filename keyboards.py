@@ -4,6 +4,7 @@ from aiogram.utils.keyboard import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+from config import PIN_OPTIONS
 
 
 def main_keyboard():
@@ -25,27 +26,39 @@ def privilege_keyboard():
     return keyboard.as_markup(resize_keyboard=True)
 
 
+def anonymity_keyboard():
+    keyboard = ReplyKeyboardBuilder()
+    keyboard.button(text="Анонимно")
+    keyboard.button(text="Публично")
+    keyboard.adjust(2)
+    return keyboard.as_markup(resize_keyboard=True)
+
+
 def set_time_kb():
+    labels = {
+        "pin_6": "6 часов",
+        "pin_12": "12 часов",
+        "pin_24": "24 часа",
+    }
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="6 часов — 20 грн",
-                    callback_data="pin_6",
+                    text=f"{labels[key]} — {uah} грн / {stars}⭐️",
+                    callback_data=key,
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="12 часов — 40 грн",
-                    callback_data="pin_12",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="24 часа — 50 грн",
-                    callback_data="pin_24",
-                )
-            ],
+            ]
+            for key, (_, uah, stars) in PIN_OPTIONS.items()
+        ]
+    )
+
+
+def payment_method_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить картой", callback_data="pin_pay_card")],
+            [InlineKeyboardButton(text="⭐️ Оплатить Telegram Stars", callback_data="pin_pay_stars")],
+            [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_pin_selection")],
         ]
     )
 
@@ -59,5 +72,36 @@ def cancel_payment_kb(order_id: int):
                     callback_data=f"cancel_payment:{order_id}",
                 )
             ]
+        ]
+    )
+
+
+def support_answer_kb(answer_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Посмотреть",
+                    callback_data=f"support_answer:{answer_id}",
+                )
+            ]
+        ]
+    )
+
+
+def moderation_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔨 Бан навсегда", callback_data="mod:ban_forever")],
+            [
+                InlineKeyboardButton(text="⏳ Бан на время", callback_data="mod:ban_temporary"),
+                InlineKeyboardButton(text="🔇 Мут на время", callback_data="mod:mute_temporary"),
+            ],
+            [InlineKeyboardButton(text="⚠️ Выдать варн", callback_data="mod:warn")],
+            [
+                InlineKeyboardButton(text="♻️ Разбанить", callback_data="mod:unban"),
+                InlineKeyboardButton(text="🔊 Снять мут", callback_data="mod:unmute"),
+            ],
+            [InlineKeyboardButton(text="✅ Снять последний варн", callback_data="mod:unwarn")],
         ]
     )
