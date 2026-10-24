@@ -6,17 +6,18 @@ from fsm import PostStates
 from keyboards import main_keyboard, privilege_keyboard
 from aiogram.types import ReplyKeyboardRemove
 from message_text import WELCOME_MESSAGE, RECIEVED_POST
+from config import MODERATION_GROUP_ID
 router = Router()
 
 # Хэндлер команды старт
-@router.message(CommandStart())
+@router.message(CommandStart(), F.chat.type =='private')
 async def welcome(message: Message, command: CommandObject):
     
     await message.answer(WELCOME_MESSAGE.format(name=message.from_user.first_name),
                          reply_markup=main_keyboard())
 
 # Хэндлер Предложить пост 🗒️
-@router.message(F.text == 'Предложить пост 🗒️')
+@router.message(F.text == 'Предложить пост 🗒️', F.chat.type =='private')
 async def suggest_post(message: Message, state: FSMContext):
     # Установка состояния 
     await state.set_state(PostStates.waiting_for_post)
@@ -49,10 +50,10 @@ async def no_privileges(
     bot: Bot):
     data = await state.get_data()
 
-    await bot.send_message(chat_id=-1004425653871, text=RECIEVED_POST.format(user_id=data['user_id']))
+    await bot.send_message(chat_id=MODERATION_GROUP_ID, text=RECIEVED_POST.format(user_id=data['user_id']))
     data = await state.get_data()
     await bot.forward_message(
-        chat_id=-1004425653871,
+        chat_id=MODERATION_GROUP_ID,
         from_chat_id=data["chat_id"],
         message_id=data["message_id"]
     )

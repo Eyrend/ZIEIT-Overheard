@@ -1,5 +1,5 @@
 from aiogram.utils.keyboard import (ReplyKeyboardBuilder, InlineKeyboardMarkup,
-                                    InlineKeyboardButton)
+                                    InlineKeyboardButton, InlineKeyboardBuilder)
 
 
 def main_keyboard():
@@ -29,3 +29,8 @@ def privilege_keyboard():
     )
     keyboard.adjust(2)
     return keyboard.as_markup(resize_keyboard=True)
+
+# def pin_keyboard():
+#     keyboard = InlineKeyboardBuilder()
+
+#     keyboard.button(text=)

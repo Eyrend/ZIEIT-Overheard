@@ -1,8 +1,9 @@
 from aiogram import BaseMiddleware
 from typing import Any, Callable, Awaitable
 from aiogram.types import TelegramObject
-from sqlwork.user import get_user, create_user
+from sqlwork.user import get_user, create_user, unban_user
 from config import ADMIN_IDS
+import time
 
 # Получение данных о пользователе 
 class UserMiddleWare(BaseMiddleware):
@@ -20,8 +21,14 @@ class UserMiddleWare(BaseMiddleware):
             is_new_user = True
 
         if user['is_banned']:
+            ban_until = user['ban_until']
+            
             await event.answer("Вы заблокированы и не можете пользоваться ботом.")
-            return
+            if ban_until is not None and ban_until <= int(time.time()):
+                unban_user(user_id)
+                user = get_user(user_id)
+            else:
+                return
 
 
         data['user'] = user
