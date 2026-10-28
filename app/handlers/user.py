@@ -1,20 +1,56 @@
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from fsm import PostStates
 from keyboards import (
+    MAIN_MENU_BUTTON,
     anonymity_keyboard,
+    ideas_and_listings_keyboard,
     main_keyboard,
+    post_preview_keyboard,
     privilege_keyboard,
+    return_to_menu_keyboard,
     set_time_kb,
 )
-from aiogram.types import ReplyKeyboardRemove
 from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT, MORE, REFUND
 from config import MODERATION_GROUP_ID
 from sqlwork.support import save_moderation_post, save_support_request
-from sqlwork.orders import get_pin_order, update_pin_order_post
+from sqlwork.orders import cancel_pin_order, get_pin_order, update_pin_order_post
+from sqlwork.user import set_user_birthday
+from utils.birthdays import current_kyiv_date, parse_birthday_date
 router = Router()
+
+
+@router.message(F.text == MAIN_MENU_BUTTON, F.chat.type == "private")
+async def return_to_main_menu(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    data = await state.get_data()
+
+    if current_state == PostStates.waiting_for_pay.state:
+        order_id = data.get("order_id")
+        order = get_pin_order(order_id) if isinstance(order_id, int) else None
+        if (
+            order is not None
+            and order["status"] == "pending"
+            and order["payment_submitted_at"] is None
+        ):
+            if not cancel_pin_order(order_id):
+                await message.answer(
+                    "Не удалось отменить ожидающий оплаты заказ. "
+                    "Используй кнопку отмены под сообщением об оплате."
+                )
+                return
+            from payment_init import stop_payment_countdown
+
+            stop_payment_countdown(order_id)
+
+    await state.clear()
+    await message.answer(
+        "🏠 Ты вернулся в главное меню.",
+        reply_markup=main_keyboard(),
+    )
+
 
 # Хэндлер команды старт
 @router.message(CommandStart(), F.chat.type == "private")
@@ -50,6 +86,92 @@ async def receive_post(message: Message, state: FSMContext, bot: Bot):
 
     data = await state.get_data()
     order_id = data.get("order_id")
+    if order_id is not None:
+        order = get_pin_order(order_id) if isinstance(order_id, int) else None
+        if (
+            order is None
+            or order["user_id"] != message.from_user.id
+            or order["status"] != "pending"
+            or order["payment_submitted_at"] is None
+        ):
+            await message.answer("Не удалось найти оплаченный заказ. Обратись в поддержку.")
+            await state.clear()
+            return
+
+    preview = await bot.copy_message(
+        chat_id=message.chat.id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        reply_markup=post_preview_keyboard(),
+    )
+    await state.update_data(
+        preview_chat_id=message.chat.id,
+        preview_message_id=preview.message_id,
+        preview_source_message_id=message.message_id,
+    )
+    await state.set_state(PostStates.post_preview)
+    await message.answer(
+        "Предпросмотр публикации. Выбери, что делать дальше:",
+        reply_markup=return_to_menu_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("post_preview:"))
+async def handle_post_preview(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+):
+    if callback.message is None:
+        await callback.answer("Предпросмотр недоступен.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    if (
+        await state.get_state() != PostStates.post_preview.state
+        or data.get("user_id") != callback.from_user.id
+        or data.get("preview_chat_id") != callback.message.chat.id
+        or data.get("preview_message_id") != callback.message.message_id
+    ):
+        await callback.answer("Предпросмотр устарел. Создай публикацию заново.", show_alert=True)
+        return
+
+    action = callback.data.removeprefix("post_preview:")
+    if action == "edit":
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await state.set_state(PostStates.waiting_for_post)
+        await callback.message.answer(
+            "Отправь изменённый текст или медиа для публикации.",
+            reply_markup=return_to_menu_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if action == "cancel":
+        order_id = data.get("order_id")
+        notice = "Публикация отменена."
+        if isinstance(order_id, int):
+            order = get_pin_order(order_id)
+            if order is not None and order["payment_submitted_at"] is not None:
+                notice += " Оплата не возвращается автоматически; по вопросам напиши в поддержку."
+        await state.clear()
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(notice, reply_markup=main_keyboard())
+        await callback.answer()
+        return
+
+    if action != "submit":
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    user_id = callback.from_user.id
+    source_chat_id = data.get("preview_chat_id")
+    source_message_id = data.get("preview_source_message_id")
+    if not isinstance(source_chat_id, int) or not isinstance(source_message_id, int):
+        await callback.answer("Не удалось найти исходную публикацию.", show_alert=True)
+        return
+
+    order_id = data.get("order_id")
     username = f"@{data['username']}" if data.get("username") else "None"
     anonymous = "Да" if data.get("anonymous", False) else "Нет"
 
@@ -57,97 +179,94 @@ async def receive_post(message: Message, state: FSMContext, bot: Bot):
         moderation_card = await bot.send_message(
             chat_id=MODERATION_GROUP_ID,
             text=RECIEVED_POST.format(
-                user_id=data["user_id"],
+                user_id=user_id,
                 username=username,
                 anonymous=anonymous,
             ),
         )
         forwarded_post = await bot.forward_message(
             chat_id=MODERATION_GROUP_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
+            from_chat_id=source_chat_id,
+            message_id=source_message_id,
         )
-        save_moderation_post(moderation_card.message_id, data["user_id"])
-        save_moderation_post(forwarded_post.message_id, data["user_id"])
-        await message.answer(
-            "✅ Пост отправлен на модерацию!",
-            reply_markup=main_keyboard(),
-        )
-        await state.clear()
-        return
+        save_moderation_post(moderation_card.message_id, user_id)
+        save_moderation_post(forwarded_post.message_id, user_id)
+    else:
+        order = get_pin_order(order_id) if isinstance(order_id, int) else None
+        if (
+            order is None
+            or order["user_id"] != user_id
+            or order["status"] != "pending"
+            or order["payment_submitted_at"] is None
+        ):
+            await callback.answer("Не удалось найти оплаченный заказ.", show_alert=True)
+            return
+        if not update_pin_order_post(
+            order_id=order_id,
+            user_id=user_id,
+            post_chat_id=source_chat_id,
+            post_message_id=source_message_id,
+        ):
+            await callback.answer("Не удалось сохранить пост для заказа.", show_alert=True)
+            return
 
-    order = get_pin_order(order_id)
-    if (
-        order is None
-        or order["user_id"] != message.from_user.id
-        or order["status"] != "pending"
-        or order["payment_submitted_at"] is None
-    ):
-        await message.answer("Не удалось найти оплаченный заказ. Обратись в поддержку.")
-        await state.clear()
-        return
-
-    if not update_pin_order_post(
-        order_id=order_id,
-        user_id=message.from_user.id,
-        post_chat_id=message.chat.id,
-        post_message_id=message.message_id,
-    ):
-        await message.answer("Не удалось сохранить пост для заказа. Отправь его ещё раз.")
-        return
-
-    try:
-        stars_payment_text = (
-            f"⭐️ Оплачено: {order['stars_amount']} Stars\n"
-            if order["payment_method"] == "stars"
-            else ""
-        )
-        payment_status_text = (
-            "💳 ОПЛАТА: ПОДТВЕРЖДЕНА TELEGRAM STARS\n"
-            if order["payment_method"] == "stars"
-            else "💳 ОПЛАТА: ОЖИДАЕТ ПРОВЕРКИ\n"
-        )
-        moderation_card = await bot.send_message(
-            chat_id=MODERATION_GROUP_ID,
-            text=(
-                "📥 НОВЫЙ ПОСТ НА МОДЕРАЦИЮ\n\n"
-                f"👤 ID пользователя: {message.from_user.id}\n"
-                f"🔗 Username: {username}\n"
-                f"🧾 Номер заказа: №{order_id}\n"
-                f"💰 Сумма: {order['amount']} грн\n"
-                f"{stars_payment_text}"
-                f"⏱ Срок закрепления: {order['hours']} ч.\n\n"
-                "📌 ЗАКРЕП: ДА\n"
-                f"{payment_status_text}"
-                f"🕶️ АНОНИМНО: {anonymous.upper()}\n\n"
-                "Проверьте поступление денег и содержание поста. "
-                "Скриншот сам по себе не подтверждает оплату."
-            ),
-        )
-        if order["payment_method"] == "card":
-            await bot.send_photo(
-                chat_id=MODERATION_GROUP_ID,
-                photo=order["payment_proof_file_id"],
-                caption=f"🧾 Чек по заказу №{order_id}",
+        try:
+            stars_payment_text = (
+                f"⭐️ Оплачено: {order['stars_amount']} Stars\n"
+                if order["payment_method"] == "stars"
+                else ""
             )
-        forwarded_post = await bot.forward_message(
-            chat_id=MODERATION_GROUP_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-        )
-    except Exception:
-        await message.answer(
-            "Не удалось передать пост и чек модераторам. "
-            "Попробуй отправить пост ещё раз."
-        )
-        return
+            payment_status_text = (
+                "💳 ОПЛАТА: ПОДТВЕРЖДЕНА TELEGRAM STARS\n"
+                if order["payment_method"] == "stars"
+                else "💳 ОПЛАТА: ОЖИДАЕТ ПРОВЕРКИ\n"
+            )
+            await bot.send_message(
+                chat_id=MODERATION_GROUP_ID,
+                text=(
+                    "📥 НОВЫЙ ПОСТ НА МОДЕРАЦИЮ\n\n"
+                    f"👤 ID пользователя: {user_id}\n"
+                    f"🔗 Username: {username}\n"
+                    f"🧾 Номер заказа: №{order_id}\n"
+                    f"💰 Сумма: {order['amount']} грн\n"
+                    f"{stars_payment_text}"
+                    f"⏱ Срок закрепления: {order['hours']} ч.\n\n"
+                    "📌 ЗАКРЕП: ДА\n"
+                    f"{payment_status_text}"
+                    f"🕶️ АНОНИМНО: {anonymous.upper()}\n\n"
+                    "Проверьте поступление денег и содержание поста. "
+                    "Скриншот сам по себе не подтверждает оплату."
+                ),
+            )
+            if order["payment_method"] == "card":
+                await bot.send_photo(
+                    chat_id=MODERATION_GROUP_ID,
+                    photo=order["payment_proof_file_id"],
+                    caption=f"🧾 Чек по заказу №{order_id}",
+                )
+            forwarded_post = await bot.forward_message(
+                chat_id=MODERATION_GROUP_ID,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+            )
+        except Exception:
+            await callback.message.answer(
+                "Не удалось передать пост и чек модераторам. "
+                "Попробуй отправить публикацию ещё раз."
+            )
+            await callback.answer()
+            return
 
-    save_moderation_post(forwarded_post.message_id, message.from_user.id)
-    await message.answer(
-        "✅ Пост и чек отправлены на модерацию!",
+        save_moderation_post(forwarded_post.message_id, user_id)
+
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        "✅ Пост и чек отправлены на модерацию!" if order_id is not None
+        else "✅ Пост отправлен на модерацию!",
         reply_markup=main_keyboard(),
     )
-    await state.clear()
+    await callback.answer()
 
 
 @router.message(
@@ -178,7 +297,7 @@ async def no_privileges(
     await state.set_state(PostStates.waiting_for_post)
     await message.answer(
         "Теперь отправь пост:",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=return_to_menu_keyboard(),
     )
 
 
@@ -191,7 +310,7 @@ async def pin_post(message: Message, state: FSMContext):
 
     await message.answer(
         "Выбери срок закрепления:",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=return_to_menu_keyboard(),
     )
     await message.answer(
         text=SET_TIME_TEXT,
@@ -206,10 +325,154 @@ async def send_more(message: Message):
 async def send_more(message: Message):
     await message.answer(REFUND)
 
+
+@router.message(F.text == "Указать дату рождения 🎂", F.chat.type == "private")
+async def ask_for_birthday(message: Message, state: FSMContext):
+    await state.set_state(PostStates.waiting_for_birthday)
+    await message.answer(
+        "Отправь дату рождения в формате ДД.ММ.ГГГГ, например: 05.11.2004.\n"
+        "Чтобы отменить, нажми кнопку главного меню.",
+        reply_markup=return_to_menu_keyboard(),
+    )
+
+
+@router.message(PostStates.waiting_for_birthday, F.chat.type == "private")
+async def save_birthday(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if text.lower() in {"/cancel", "отмена"}:
+        await state.clear()
+        await message.answer("Ввод даты рождения отменён.", reply_markup=main_keyboard())
+        return
+
+    birthday = parse_birthday_date(text)
+    if birthday is None:
+        await message.answer("Некорректная дата. Введи её в формате ДД.ММ.ГГГГ.")
+        return
+
+    if birthday > current_kyiv_date():
+        await message.answer("Дата рождения не может быть в будущем.")
+        return
+
+    saved = set_user_birthday(
+        telegram_id=message.from_user.id,
+        birthday=birthday.isoformat(),
+        name=message.from_user.first_name,
+        username=message.from_user.username,
+    )
+    if not saved:
+        await message.answer("Не удалось сохранить дату рождения. Попробуй ещё раз.")
+        return
+
+    await state.clear()
+    await message.answer(
+        f"✅ Дата рождения сохранена: {birthday.strftime('%d.%m.%Y')}.",
+        reply_markup=main_keyboard(),
+    )
+
+
 @router.message(F.text == "Поддержка 🛟")
 async def support(message: Message, state: FSMContext):
     await state.set_state(PostStates.support_message)
-    await message.answer("🛟 Напиши своё обращение. Оно будет отправлено администрации.")
+    await message.answer(
+        "🛟 Напиши своё обращение. Оно будет отправлено администрации.",
+        reply_markup=return_to_menu_keyboard(),
+    )
+
+
+@router.message(F.text == "Идеи и объявления 💡", F.chat.type == "private")
+async def show_ideas_and_listings(message: Message):
+    await message.answer(
+        "Что хочешь сделать?",
+        reply_markup=ideas_and_listings_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("user_option:"))
+async def choose_user_option(callback: CallbackQuery, state: FSMContext):
+    if callback.message is None or callback.message.chat.type != "private":
+        await callback.answer("Этот выбор доступен только в личном чате.", show_alert=True)
+        return
+    if callback.from_user.id != callback.message.chat.id:
+        await callback.answer("Это меню предназначено для пользователя бота.", show_alert=True)
+        return
+
+    action = callback.data.removeprefix("user_option:")
+    options = {
+        "lost_item": (
+            PostStates.lost_item,
+            "Опиши потерянную или найденную вещь: что это, где и когда потерялась "
+            "или была найдена, как с тобой связаться. Можно приложить фото.",
+        ),
+        "improvement": (
+            PostStates.suggest_improvement,
+            "Опиши, что ты предлагаешь улучшить в боте. "
+            "Можно отправить текст или медиа.",
+        ),
+    }
+    option = options.get(action)
+    if option is None:
+        await callback.answer("Неизвестный вариант.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(option[0])
+    await callback.message.answer(
+        option[1],
+        reply_markup=return_to_menu_keyboard(),
+    )
+    await callback.answer()
+
+
+async def forward_user_request(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    title: str,
+    confirmation: str,
+):
+    user = message.from_user
+    await bot.send_message(
+        chat_id=MODERATION_GROUP_ID,
+        text=(
+            f"{title}\n\n"
+            f"👤 Пользователь: {user.full_name}\n"
+            f"🆔 Telegram ID: {user.id}\n"
+            f"🔗 Username: @{user.username if user.username else 'отсутствует'}"
+        ),
+    )
+    forwarded_message = await bot.forward_message(
+        chat_id=MODERATION_GROUP_ID,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+    )
+    save_support_request(
+        group_message_id=forwarded_message.message_id,
+        user_id=user.id,
+    )
+    await state.clear()
+    await message.answer(confirmation, reply_markup=main_keyboard())
+
+
+@router.message(PostStates.suggest_improvement, F.chat.type == "private")
+async def receive_improvement(message: Message, state: FSMContext, bot: Bot):
+    await forward_user_request(
+        message,
+        state,
+        bot,
+        "💡 ПРЕДЛОЖЕНИЕ ПО УЛУЧШЕНИЮ БОТА",
+        "✅ Предложение отправлено администрации. Спасибо!",
+    )
+
+
+@router.message(PostStates.lost_item, F.chat.type == "private")
+async def receive_lost_item(message: Message, state: FSMContext, bot: Bot):
+    await forward_user_request(
+        message,
+        state,
+        bot,
+        "🔎 ПОТЕРЯННАЯ ИЛИ НАЙДЕННАЯ ВЕЩЬ",
+        "✅ Информация отправлена администрации. Если появятся новости, мы свяжемся с тобой.",
+    )
 
 
 @router.message(PostStates.support_message)
@@ -245,4 +508,3 @@ async def receive_support_message(
         reply_markup=main_keyboard(),
     )
     await state.clear()
-

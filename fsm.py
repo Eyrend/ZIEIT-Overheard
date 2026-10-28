@@ -10,3 +10,8 @@ class PostStates(StatesGroup):
     waiting_for_duration = State()
     waiting_for_pay = State()
     moderation_target = State()
+    moderation_birthday_edit = State()
+    waiting_for_birthday = State()
+    post_preview = State()
+    suggest_improvement = State()
+    lost_item = State()

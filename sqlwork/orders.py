@@ -118,6 +118,46 @@ def get_pin_order(order_id: int):
         return dict(row) if row is not None else None
 
 
+def get_pin_orders_for_archive():
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT pin_orders.*, users.name AS user_name, users.username
+            FROM pin_orders
+            LEFT JOIN users ON users.telegram_id = pin_orders.user_id
+            ORDER BY pin_orders.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_pin_order_statistics():
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_orders,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_orders,
+                SUM(CASE WHEN status = 'fulfilled' THEN 1 ELSE 0 END) AS fulfilled_orders
+            FROM pin_orders
+            """
+        ).fetchone()
+        return dict(row)
+
+
+def delete_pin_orders(order_ids: list[int]) -> int:
+    if not order_ids:
+        return 0
+
+    placeholders = ", ".join("?" for _ in order_ids)
+    with get_connection() as conn:
+        cursor = conn.execute(
+            f"DELETE FROM pin_orders WHERE id IN ({placeholders})",
+            tuple(order_ids),
+        )
+        return cursor.rowcount
+
+
 def update_pin_order_post(
     order_id: int,
     user_id: int,
@@ -215,4 +255,3 @@ def expire_pin_order(order_id: int) -> bool:
             (order_id, int(time.time())),
         )
         return cursor.rowcount == 1
-

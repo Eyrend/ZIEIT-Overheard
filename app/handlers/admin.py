@@ -1,10 +1,19 @@
+from html import escape
+
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, Message
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from fsm import PostStates
-from keyboards import moderation_keyboard, support_answer_kb
+from keyboards import (
+    birthday_delete_keyboard,
+    birthday_list_keyboard,
+    birthday_user_keyboard,
+    moderation_keyboard,
+    support_answer_kb,
+)
 from sqlwork.support import (
+    count_support_requests,
     create_support_answer,
     get_support_answer,
     get_moderation_post_user,
@@ -13,16 +22,28 @@ from sqlwork.support import (
 from sqlwork.user import (
     add_user_warning,
     ban_user,
+    count_birthday_users,
     create_user,
+    delete_user_birthday,
     get_active_warning_count,
+    get_birthday_user,
+    get_birthday_users,
     get_user,
     get_user_by_username,
+    get_user_statistics,
     mute_user,
     remove_latest_user_warning,
+    set_user_birthday,
     unban_user,
     unmute_user,
 )
 from config import ADMIN_IDS, MODERATION_GROUP_ID
+from sqlwork.orders import get_pin_order_statistics
+from utils.birthdays import (
+    current_kyiv_date,
+    format_stored_birthday,
+    parse_birthday_date,
+)
 from utils.duration import parse_duration
 
 
@@ -44,6 +65,54 @@ async def show_moderation_panel(message: Message, is_admin: bool):
     )
 
 
+def _birthday_list_content(page: int, users, total_count: int) -> str:
+    if not total_count:
+        return "🎂 <b>Дни рождения</b>\n\nПока нет сохранённых дат рождения."
+
+    lines = ["🎂 <b>Дни рождения</b>"]
+    for index, user in enumerate(users, start=page * 5 + 1):
+        username = f"@{user['username']}" if user["username"] else "нет"
+        birthday_text = format_stored_birthday(user["birthday"])
+        lines.append(
+            f"{index}. {escape(user['name'] or 'Без имени')} — {escape(username)}\n"
+            f"   ID: <code>{user['telegram_id']}</code> | ДР: {birthday_text}"
+        )
+    return "\n\n".join(lines)
+
+
+async def _show_birthday_page(message: Message, page: int, edit: bool = False):
+    total_count = count_birthday_users()
+    total_pages = max(1, (total_count + 4) // 5)
+    page = min(max(page, 0), total_pages - 1)
+    users = get_birthday_users(limit=5, offset=page * 5)
+    text = _birthday_list_content(page, users, total_count)
+    markup = birthday_list_keyboard(users, page, total_pages)
+    if edit:
+        await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def _show_admin_statistics(message: Message):
+    user_stats = get_user_statistics(days=7)
+    order_stats = get_pin_order_statistics()
+    support_count = count_support_requests()
+    await message.answer(
+        "📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{user_stats['total_users'] or 0}</b>\n"
+        f"🆕 Новых за 7 дней: <b>{user_stats['new_users'] or 0}</b>\n"
+        f"🔨 Пользователей с активным баном: <b>{user_stats['banned_users'] or 0}</b>\n"
+        f"🎂 Дней рождения указано: <b>{user_stats['birthday_users'] or 0}</b>\n\n"
+        f"📌 Заказов на закрепление: <b>{order_stats['total_orders'] or 0}</b>\n"
+        f"⏳ Ожидают завершения: <b>{order_stats['pending_orders'] or 0}</b>\n"
+        f"✅ Выполнено: <b>{order_stats['fulfilled_orders'] or 0}</b>\n"
+        f"📨 Заявок от пользователей: <b>{support_count}</b>\n\n"
+        "<i>Учёт новых пользователей начинается после установки обновления.</i>",
+        reply_markup=moderation_keyboard(),
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data.startswith("mod:"))
 async def choose_moderation_action(
     callback: CallbackQuery,
@@ -60,9 +129,19 @@ async def choose_moderation_action(
     action = callback.data.removeprefix("mod:")
     if action not in {
         "ban_forever", "ban_temporary", "mute_temporary", "warn",
-        "unban", "unmute", "unwarn",
+        "unban", "unmute", "unwarn", "birthdays", "stats",
     }:
         await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    if action == "stats":
+        await _show_admin_statistics(callback.message)
+        await callback.answer()
+        return
+
+    if action == "birthdays":
+        await _show_birthday_page(callback.message, page=0)
+        await callback.answer()
         return
 
     await state.update_data(moderation_action=action)
@@ -78,6 +157,138 @@ async def choose_moderation_action(
     }
     await callback.message.answer(instructions[action], parse_mode="HTML")
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("birthday:"))
+async def manage_birthdays(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if callback.message is None or callback.message.chat.id != MODERATION_GROUP_ID:
+        await callback.answer("Раздел работает только в группе модерации.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "noop":
+        await callback.answer()
+        return
+    if action == "back":
+        await callback.message.edit_text(
+            "⚖️ <b>Модерация пользователей</b>",
+            reply_markup=moderation_keyboard(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+    if action == "page" and len(parts) == 3:
+        try:
+            page = int(parts[2])
+        except ValueError:
+            await callback.answer("Некорректная страница.", show_alert=True)
+            return
+        await _show_birthday_page(callback.message, page, edit=True)
+        await callback.answer()
+        return
+    if action in {"user", "edit", "delete", "confirm_delete"} and len(parts) == 4:
+        try:
+            user_id = int(parts[2])
+            page = int(parts[3])
+        except ValueError:
+            await callback.answer("Некорректные данные пользователя.", show_alert=True)
+            return
+        user = get_birthday_user(user_id)
+        if user is None:
+            await callback.answer("Дата рождения не найдена.", show_alert=True)
+            await _show_birthday_page(callback.message, page, edit=True)
+            return
+
+        if action == "user":
+            username = f"@{user['username']}" if user["username"] else "не указан"
+            birthday_text = format_stored_birthday(user["birthday"])
+            await callback.message.edit_text(
+                "🎂 <b>Дата рождения пользователя</b>\n\n"
+                f"Никнейм: {escape(user['name'] or 'Без имени')}\n"
+                f"Username: {escape(username)}\n"
+                f"ID: <code>{user_id}</code>\n"
+                f"Дата рождения: {birthday_text}",
+                reply_markup=birthday_user_keyboard(user_id, page),
+                parse_mode="HTML",
+            )
+        elif action == "edit":
+            await state.update_data(
+                birthday_edit_user_id=user_id,
+                birthday_edit_page=page,
+            )
+            await state.set_state(PostStates.moderation_birthday_edit)
+            await callback.message.answer(
+                f"Введи новую дату рождения для пользователя {user_id} "
+                "в формате ДД.ММ.ГГГГ. Для отмены напиши /cancel."
+            )
+        elif action == "delete":
+            await callback.message.edit_text(
+                f"Удалить дату рождения пользователя {user_id}?",
+                reply_markup=birthday_delete_keyboard(user_id, page),
+            )
+        else:
+            if not delete_user_birthday(user_id):
+                await callback.answer("Не удалось удалить дату рождения.", show_alert=True)
+                return
+            await callback.answer("Дата рождения удалена.")
+            await _show_birthday_page(callback.message, page, edit=True)
+            return
+        await callback.answer()
+        return
+
+    await callback.answer("Неизвестное действие.", show_alert=True)
+
+
+@router.message(
+    F.chat.id == MODERATION_GROUP_ID,
+    PostStates.moderation_birthday_edit,
+)
+async def edit_user_birthday(message: Message, state: FSMContext, is_admin: bool):
+    if not is_admin:
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if text.lower() in {"/cancel", "отмена"}:
+        await state.clear()
+        await message.answer("Изменение даты рождения отменено.")
+        return
+
+    birthday = parse_birthday_date(text)
+    if birthday is None:
+        await message.answer("Некорректная дата. Введи её в формате ДД.ММ.ГГГГ.")
+        return
+    if birthday > current_kyiv_date():
+        await message.answer("Дата рождения не может быть в будущем.")
+        return
+
+    data = await state.get_data()
+    user_id = data.get("birthday_edit_user_id")
+    page = data.get("birthday_edit_page", 0)
+    user = get_birthday_user(user_id) if isinstance(user_id, int) else None
+    if user is None:
+        await state.clear()
+        await message.answer("Пользователь не найден или его дата рождения уже удалена.")
+        return
+    if not set_user_birthday(
+        user_id,
+        birthday.isoformat(),
+        name=user["name"],
+        username=user["username"],
+    ):
+        await message.answer("Не удалось сохранить дату рождения. Попробуй ещё раз.")
+        return
+
+    await state.clear()
+    await message.answer(
+        f"✅ Дата рождения пользователя {user_id} изменена на "
+        f"{birthday.strftime('%d.%m.%Y')}."
+    )
+    await _show_birthday_page(message, page=page if isinstance(page, int) else 0)
 
 
 @router.message(

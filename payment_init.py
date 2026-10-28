@@ -11,7 +11,6 @@ from aiogram.types import (
     LabeledPrice,
     Message,
     PreCheckoutQuery,
-    ReplyKeyboardRemove,
 )
 
 from fsm import PostStates
@@ -25,6 +24,7 @@ from keyboards import (
     cancel_payment_kb,
     main_keyboard,
     payment_method_kb,
+    return_to_menu_keyboard,
 )
 from sqlwork.orders import (
     create_pin_order,
@@ -394,7 +394,7 @@ async def receive_stars_payment(
     await state.set_state(PostStates.waiting_for_post)
     await message.answer(
         "✅ Оплата Stars получена. Теперь отправь пост для модерации.",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=return_to_menu_keyboard(),
     )
 
 
@@ -467,7 +467,7 @@ async def receive_payment_photo(
     await state.set_state(PostStates.waiting_for_post)
     await message.answer(
         "✅ Чек получен. Теперь отправь текст или медиа поста для модерации.",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=return_to_menu_keyboard(),
     )
 
 

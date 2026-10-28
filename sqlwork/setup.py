@@ -43,6 +43,9 @@ def add_ban_reason_column():
             "is_muted": "INTEGER NOT NULL DEFAULT 0",
             "mute_until": "INTEGER",
             "mute_reason": "TEXT",
+            "birthday": "TEXT",
+            "birthday_notified_on": "TEXT",
+            "created_at": "INTEGER",
         }
         for column, definition in new_columns.items():
             if column not in columns:
@@ -54,5 +57,3 @@ def add_ban_reason_column():
             "CREATE INDEX IF NOT EXISTS idx_users_username "
             "ON users(username COLLATE NOCASE)"
         )
-
-

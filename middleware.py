@@ -10,6 +10,7 @@ from sqlwork.user import (
 from config import ADMIN_IDS
 from aiogram.fsm.context import FSMContext
 from fsm import PostStates
+from keyboards import MAIN_MENU_BUTTON
 import time
 
 # Получение данных о пользователе 
@@ -26,9 +27,10 @@ class UserMiddleWare(BaseMiddleware):
                     event_text == "/start"
                     or event_text.startswith("/start ")
                 )
+                is_main_menu = event_text == MAIN_MENU_BUTTON
                 if not getattr(event, "photo", None) and not getattr(
                     event, "successful_payment", None
-                ) and not is_start_command:
+                ) and not is_start_command and not is_main_menu:
                     await event.answer(
                         "Сначала заверши оплату или отмени заказ "
                         "кнопкой под сообщением об оплате."

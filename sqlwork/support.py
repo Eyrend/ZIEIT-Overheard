@@ -50,6 +50,14 @@ def get_support_user(group_message_id: int):
         return row["user_id"] if row is not None else None
 
 
+def count_support_requests():
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM support_requests"
+        ).fetchone()
+        return row["count"]
+
+
 def save_moderation_post(group_message_id: int, user_id: int):
     with get_connection() as conn:
         conn.execute(
