@@ -31,7 +31,7 @@ from sqlwork.orders import (
     get_pin_order,
     cancel_pin_order,
     expire_pin_order,
-    mark_payment_submitted,
+    mark_pin_order_proof_submitted,
     mark_stars_payment_submitted,
 )
 
@@ -71,7 +71,7 @@ async def _payment_countdown(
                         await bot.edit_message_text(
                             chat_id=user_id,
                             message_id=status_message_id,
-                            text="⏰ Время оплаты истекло. Заказ отменён.",
+                            text="⏰ Время отправки подтверждения истекло. Заказ отменён.",
                             reply_markup=None,
                         )
                     except Exception:
@@ -88,7 +88,7 @@ async def _payment_countdown(
                     await bot.send_message(
                         chat_id=user_id,
                         text=(
-                            "Время оплаты вышло, заказ отменён. "
+                            "Время вышло, заказ отменён. "
                             "Чтобы начать заново, нажми «Предложить пост 🗒️»."
                         ),
                         reply_markup=main_keyboard(),
@@ -193,9 +193,9 @@ async def create_payment_order(
         post_chat_id=0,
         post_message_id=0,
         hours=data["hours"],
-        amount=data["amount"],
+        amount=0 if payment_method == "giveaway" else data["amount"],
         payment_method=payment_method,
-        stars_amount=data["stars_amount"],
+        stars_amount=None if payment_method == "giveaway" else data["stars_amount"],
     )
     await state.update_data(order_id=order_id)
     await state.set_state(PostStates.waiting_for_pay)
@@ -288,6 +288,42 @@ async def choose_stars_payment(
         f"{status_text}\n\n⏳ Осталось: 15:00",
         reply_markup=cancel_payment_kb(order["id"]),
     )
+    await state.update_data(payment_status_message_id=status_message.message_id)
+    start_payment_countdown(
+        callback.bot,
+        state,
+        order["id"],
+        callback.from_user.id,
+        status_message.message_id,
+        status_text,
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    PostStates.choosing_payment_method,
+    F.data == "pin_pay_giveaway",
+)
+async def choose_giveaway_payment(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    order = await create_payment_order(callback, state, "giveaway")
+    if order is None:
+        return
+
+    status_text = (
+        f"🏆 Закреп для победителя розыгрыша №{order['id']}\n\n"
+        f"⏱ Длительность: {order['hours']} ч.\n"
+        "💰 Стоимость: бесплатно\n\n"
+        "Отправь фотографию или скриншот, подтверждающий победу. "
+        "После этого бот попросит написать пост."
+    )
+    status_message = await callback.message.answer(
+        f"{status_text}\n\n⏳ Осталось: 15:00",
+        reply_markup=cancel_payment_kb(order["id"]),
+    )
+    await callback.message.edit_reply_markup(reply_markup=None)
     await state.update_data(payment_status_message_id=status_message.message_id)
     start_payment_countdown(
         callback.bot,
@@ -422,19 +458,21 @@ async def receive_payment_photo(
         order is None
         or order["user_id"] != message.from_user.id
         or order["status"] != "pending"
+        or order["payment_method"] not in {"card", "giveaway"}
     ):
         await message.answer(
-            "Этот заказ больше не ожидает подтверждения чека."
+            "Этот заказ больше не ожидает подтверждения."
         )
         await state.clear()
         return
 
     photo_file_id = message.photo[-1].file_id
 
-    saved = mark_payment_submitted(
+    saved = mark_pin_order_proof_submitted(
         order_id=order_id,
         user_id=message.from_user.id,
         file_id=photo_file_id,
+        payment_method=order["payment_method"],
     )
 
     if not saved:
@@ -442,13 +480,17 @@ async def receive_payment_photo(
             stop_payment_countdown(order_id)
             await state.clear()
             await message.answer(
-                "Время оплаты вышло, заказ отменён. "
+                "Время вышло, заказ отменён. "
                 "Чтобы начать заново, нажми «Предложить пост 🗒️».",
                 reply_markup=main_keyboard(),
             )
             return
         await message.answer(
-            "Чек уже отправлен или заказ отменён."
+            (
+                "Подтверждение победы уже отправлено или заказ отменён."
+                if order["payment_method"] == "giveaway"
+                else "Чек уже отправлен или заказ отменён."
+            )
         )
         return
 
@@ -466,17 +508,31 @@ async def receive_payment_photo(
 
     await state.set_state(PostStates.waiting_for_post)
     await message.answer(
-        "✅ Чек получен. Теперь отправь текст или медиа поста для модерации.",
+        (
+            "✅ Скриншот победы получен. Теперь отправь текст или медиа поста "
+            "для модерации."
+            if order["payment_method"] == "giveaway"
+            else "✅ Чек получен. Теперь отправь текст или медиа поста для модерации."
+        ),
         reply_markup=return_to_menu_keyboard(),
     )
 
 
 @router.message(PostStates.waiting_for_pay)
-async def payment_requires_photo(message: Message):
+async def payment_requires_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    order = get_pin_order(order_id) if isinstance(order_id, int) else None
+    if order is not None and order["payment_method"] == "giveaway":
+        await message.answer(
+            "Ожидаю фотографию или скриншот победы. "
+            "Отправь его как фото или отмени заказ кнопкой выше."
+        )
+        return
+
     await message.answer(
         "Ожидаю фотографию чека.\n"
-        "Отправь её как фото или нажми «Отменить оплату» "
-        "под сообщением с реквизитами."
+        "Отправь её как фото или отмени заказ кнопкой под сообщением."
     )
 
 
@@ -515,7 +571,7 @@ async def cancel_payment(
 
     if not cancel_pin_order(order_id):
         await callback.answer(
-            "Заказ уже отменён или чек уже отправлен.",
+            "Заказ уже отменён или подтверждение уже отправлено.",
             show_alert=True,
         )
         return

@@ -1,7 +1,16 @@
+import json
+import logging
+import re
+import time
 from html import escape
 
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    LinkPreviewOptions,
+    Message,
+    MessageEntity,
+)
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from fsm import PostStates
@@ -10,13 +19,23 @@ from keyboards import (
     birthday_list_keyboard,
     birthday_user_keyboard,
     moderation_keyboard,
+    rejection_reason_reply,
     support_answer_kb,
 )
 from sqlwork.support import (
+    cancel_post_submission_rejection,
+    claim_post_submission_approval,
+    claim_post_submission_rejection,
     count_support_requests,
     create_support_answer,
     get_support_answer,
     get_moderation_post_user,
+    get_post_submission_by_rejection_prompt,
+    mark_post_submission_published,
+    mark_post_submission_rejected,
+    mark_post_submission_unpinned,
+    restore_post_submission_pending,
+    save_post_rejection_prompt,
     get_support_user,
 )
 from sqlwork.user import (
@@ -37,7 +56,12 @@ from sqlwork.user import (
     unban_user,
     unmute_user,
 )
-from config import ADMIN_IDS, MODERATION_GROUP_ID
+from config import (
+    ADMIN_IDS,
+    MODERATION_GROUP_ID,
+    MODERATION_GROUP_USERNAME,
+    PUBLISH_CHANNEL_ID,
+)
 from sqlwork.orders import get_pin_order_statistics
 from utils.birthdays import (
     current_kyiv_date,
@@ -48,11 +72,70 @@ from utils.duration import parse_duration
 
 
 router = Router()
+logger = logging.getLogger(__name__)
+
+
+def _utf16_length(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _post_with_author_quote(submission: dict) -> tuple[str, list[MessageEntity]]:
+    if submission.get("post_content_type") is None:
+        raise ValueError("This submission has no stored post text")
+    post_text = submission.get("post_text") or ""
+
+    entities = [
+        MessageEntity.model_validate(entity)
+        for entity in json.loads(submission.get("post_entities") or "[]")
+    ]
+    author_text = f"Автор: {submission['author_label']}"
+    separator = "\n\n" if post_text else ""
+    text = f"{post_text}{separator}{author_text}"
+    if submission["post_content_type"] == "text":
+        limit = 4096
+    elif submission["post_content_type"] in {
+        "photo",
+        "video",
+        "animation",
+        "audio",
+        "document",
+    }:
+        limit = 1024
+    else:
+        raise ValueError(
+            f"Cannot add author quote to {submission['post_content_type']} messages"
+        )
+    if _utf16_length(text) > limit:
+        raise ValueError(
+            "The post is too long to add an author quote in the same message"
+        )
+
+    quote_offset = _utf16_length(post_text + separator)
+    quote_length = _utf16_length(author_text)
+    entities.append(
+        MessageEntity(
+            type="blockquote",
+            offset=quote_offset,
+            length=quote_length,
+        )
+    )
+    username = submission["author_label"]
+    if re.fullmatch(r"@[A-Za-z0-9_]{5,32}", username):
+        author_offset = quote_offset + _utf16_length("Автор: ")
+        entities.append(
+            MessageEntity(
+                type="text_link",
+                offset=author_offset,
+                length=_utf16_length(username),
+                url=f"https://t.me/{username[1:]}",
+            )
+        )
+    return text, entities
 
 
 @router.message(
     Command("moderation", "mod"),
-    F.chat.id == MODERATION_GROUP_ID,
+    F.chat.username == MODERATION_GROUP_USERNAME,
 )
 async def show_moderation_panel(message: Message, is_admin: bool):
     if not is_admin:
@@ -113,6 +196,230 @@ async def _show_admin_statistics(message: Message):
     )
 
 
+@router.callback_query(F.data.startswith("post_review:"))
+async def review_post_submission(
+    callback: CallbackQuery,
+    bot: Bot,
+):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if (
+        callback.message is None
+        or callback.message.chat.username != MODERATION_GROUP_USERNAME
+    ):
+        await callback.answer("Кнопки работают только в чате модерации.", show_alert=True)
+        return
+
+    match = re.fullmatch(r"post_review:(approve|reject):(\d+)", callback.data)
+    if match is None:
+        await callback.answer("Некорректная заявка.", show_alert=True)
+        return
+
+    action, submission_id_text = match.groups()
+    submission_id = int(submission_id_text)
+    if action == "reject":
+        if not claim_post_submission_rejection(submission_id):
+            await callback.answer("Заявка уже обработана или устарела.", show_alert=True)
+            return
+        try:
+            prompt = await callback.message.answer(
+                f"Напиши причину отказа для заявки №{submission_id} "
+                "ответом на это сообщение.",
+                reply_markup=rejection_reason_reply(),
+            )
+        except Exception:
+            cancel_post_submission_rejection(submission_id)
+            logger.exception(
+                "Could not request rejection reason for submission %s",
+                submission_id,
+            )
+            await callback.answer("Не удалось запросить причину отказа.", show_alert=True)
+            return
+        if not save_post_rejection_prompt(submission_id, prompt.message_id):
+            cancel_post_submission_rejection(submission_id)
+            await callback.answer("Не удалось сохранить запрос причины.", show_alert=True)
+            return
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Напиши причину отказа ответом на сообщение бота.")
+        return
+
+    submission = claim_post_submission_approval(submission_id)
+    if submission is None:
+        await callback.answer("Заявка уже обработана или устарела.", show_alert=True)
+        return
+
+    try:
+        if submission["post_content_type"] == "text":
+            post_text = submission.get("post_text") or ""
+            post_entities = [
+                MessageEntity.model_validate(entity)
+                for entity in json.loads(submission.get("post_entities") or "[]")
+            ]
+            if not submission["anonymous"]:
+                post_text, post_entities = _post_with_author_quote(submission)
+            published_post = await bot.send_message(
+                chat_id=PUBLISH_CHANNEL_ID,
+                text=post_text,
+                entities=post_entities,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        elif submission["anonymous"]:
+            published_post = await bot.copy_message(
+                chat_id=PUBLISH_CHANNEL_ID,
+                from_chat_id=submission["source_chat_id"],
+                message_id=submission["source_message_id"],
+            )
+        else:
+            post_text, post_entities = _post_with_author_quote(submission)
+            published_post = await bot.copy_message(
+                chat_id=PUBLISH_CHANNEL_ID,
+                from_chat_id=submission["source_chat_id"],
+                message_id=submission["source_message_id"],
+                caption=post_text,
+                caption_entities=post_entities,
+            )
+    except Exception as error:
+        if not restore_post_submission_pending(submission_id):
+            logger.error(
+                "Could not restore submission %s after publication failed",
+                submission_id,
+            )
+        logger.exception("Could not publish submission %s", submission_id)
+        error_text = (
+            "Не удалось добавить цитату автора в это сообщение. "
+            "Попроси автора прислать более короткий текст или обычное фото/видео."
+            if isinstance(error, ValueError)
+            else "Не удалось опубликовать пост. "
+            "Проверь права бота в канале и попробуй снова."
+        )
+        await callback.answer(error_text, show_alert=True)
+        return
+
+    published_at = int(time.time())
+    unpin_at = (
+        published_at + submission["pin_hours"] * 3600
+        if submission["pin_hours"] is not None
+        else None
+    )
+    if not mark_post_submission_published(
+        submission_id,
+        published_post.message_id,
+        unpin_at,
+    ):
+        logger.error(
+            "Post %s was published but its state could not be saved",
+            submission_id,
+        )
+        await callback.answer(
+            "Пост опубликован, но не удалось сохранить результат в базе.",
+            show_alert=True,
+        )
+        return
+
+    follow_up_errors = []
+    if submission["pin_hours"] is not None:
+        try:
+            await bot.pin_chat_message(
+                chat_id=PUBLISH_CHANNEL_ID,
+                message_id=published_post.message_id,
+                disable_notification=True,
+            )
+        except Exception:
+            follow_up_errors.append("не удалось закрепить пост")
+            logger.exception("Could not pin submission %s", submission_id)
+            if not mark_post_submission_unpinned(submission_id):
+                logger.error(
+                    "Could not mark failed pin as complete for submission %s",
+                    submission_id,
+                )
+
+    result_text = f"✅ Заявка №{submission_id} одобрена и опубликована."
+    if follow_up_errors:
+        result_text += "\n⚠️ " + "; ".join(follow_up_errors) + "."
+    try:
+        await callback.message.edit_text(result_text, reply_markup=None)
+    except Exception:
+        logger.exception("Could not update review message for submission %s", submission_id)
+    try:
+        await bot.send_message(
+            chat_id=submission["user_id"],
+            text="✅ Твой пост одобрен и опубликован в канале.",
+        )
+    except Exception:
+        logger.exception("Could not notify author for submission %s", submission_id)
+    await callback.answer("Пост опубликован.")
+
+
+@router.message(
+    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.reply_to_message,
+    F.reply_to_message.message_id.func(
+        lambda message_id: (
+            get_post_submission_by_rejection_prompt(message_id) is not None
+        )
+    ),
+    F.text,
+)
+async def receive_post_rejection_reason(
+    message: Message,
+    bot: Bot,
+    is_admin: bool,
+):
+    if not is_admin:
+        return
+
+    submission = get_post_submission_by_rejection_prompt(
+        message.reply_to_message.message_id
+    )
+    if submission is None:
+        return
+
+    reason = message.text.strip()
+    if not reason:
+        await message.reply("Причина не должна быть пустой. Напиши её ещё раз.")
+        return
+
+    try:
+        await bot.send_message(
+            chat_id=submission["user_id"],
+            text=f"❌ Твой пост отклонён.\nПричина: {reason}",
+        )
+    except Exception:
+        logger.exception(
+            "Could not deliver rejection reason for submission %s",
+            submission["id"],
+        )
+        await message.reply(
+            "Не удалось отправить причину автору. Проверь, что он не заблокировал бота."
+        )
+        return
+
+    if not mark_post_submission_rejected(submission["id"], reason):
+        await message.reply(
+            "Причина отправлена, но не удалось сохранить решение. "
+            "Проверь заявку в базе перед повторной обработкой."
+        )
+        logger.error("Could not mark submission %s as rejected", submission["id"])
+        return
+
+    review_message_id = submission.get("review_message_id")
+    if review_message_id is not None:
+        try:
+            await bot.edit_message_text(
+                chat_id=MODERATION_GROUP_ID,
+                message_id=review_message_id,
+                text=f"❌ Заявка №{submission['id']} отклонена.",
+                reply_markup=None,
+            )
+        except Exception:
+            logger.exception(
+                "Could not update review message for submission %s",
+                submission["id"],
+            )
+    await message.reply("Причина отправлена автору. Заявка отклонена.")
+
+
 @router.callback_query(F.data.startswith("mod:"))
 async def choose_moderation_action(
     callback: CallbackQuery,
@@ -122,7 +429,10 @@ async def choose_moderation_action(
         await callback.answer("Нет доступа.", show_alert=True)
         return
 
-    if callback.message is None or callback.message.chat.id != MODERATION_GROUP_ID:
+    if (
+        callback.message is None
+        or callback.message.chat.username != MODERATION_GROUP_USERNAME
+    ):
         await callback.answer("Панель работает только в группе модерации.", show_alert=True)
         return
 
@@ -164,7 +474,10 @@ async def manage_birthdays(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    if callback.message is None or callback.message.chat.id != MODERATION_GROUP_ID:
+    if (
+        callback.message is None
+        or callback.message.chat.username != MODERATION_GROUP_USERNAME
+    ):
         await callback.answer("Раздел работает только в группе модерации.", show_alert=True)
         return
 
@@ -244,7 +557,7 @@ async def manage_birthdays(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(
-    F.chat.id == MODERATION_GROUP_ID,
+    F.chat.username == MODERATION_GROUP_USERNAME,
     PostStates.moderation_birthday_edit,
 )
 async def edit_user_birthday(message: Message, state: FSMContext, is_admin: bool):
@@ -292,7 +605,7 @@ async def edit_user_birthday(message: Message, state: FSMContext, is_admin: bool
 
 
 @router.message(
-    F.chat.id == MODERATION_GROUP_ID,
+    F.chat.username == MODERATION_GROUP_USERNAME,
     PostStates.moderation_target,
 )
 async def apply_moderation_action(
@@ -419,7 +732,7 @@ async def apply_moderation_action(
 
 
 @router.message(
-    F.chat.id == MODERATION_GROUP_ID,
+    F.chat.username == MODERATION_GROUP_USERNAME,
     F.reply_to_message,
     F.reply_to_message.forward_origin,
     F.text,
@@ -502,7 +815,10 @@ async def show_support_answer(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.message(Command("ban"), F.chat.id == MODERATION_GROUP_ID)
+@router.message(
+    Command("ban"),
+    F.chat.username == MODERATION_GROUP_USERNAME,
+)
 async def ban_command(message: Message, bot: Bot, is_admin: bool):
     if not is_admin:
         return
@@ -585,7 +901,10 @@ async def ban_command(message: Message, bot: Bot, is_admin: bool):
     
 
 
-@router.message(Command('unban'), F.chat.id == MODERATION_GROUP_ID)
+@router.message(
+    Command('unban'),
+    F.chat.username == MODERATION_GROUP_USERNAME,
+)
 async def unban_command(message: Message, is_admin: bool, user):
     if not is_admin:
         return
@@ -611,7 +930,10 @@ async def unban_command(message: Message, is_admin: bool, user):
     unban_user(user_id)
     await message.answer(f"Пользователь {user_id} разбанен")
 
-@router.message(Command("reply"), F.chat.id == MODERATION_GROUP_ID)
+@router.message(
+    Command("reply"),
+    F.chat.username == MODERATION_GROUP_USERNAME,
+)
 async def reply_to_user(message: Message, bot: Bot, is_admin: bool):
     if not is_admin:
         return

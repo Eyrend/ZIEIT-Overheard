@@ -1,5 +1,6 @@
 
 import time
+from typing import Literal
 
 from sqlwork.connection import get_connection
 
@@ -194,10 +195,11 @@ def cancel_pin_order(order_id: int) -> bool:
         return cursor.rowcount == 1
 
 
-def mark_payment_submitted(
+def mark_pin_order_proof_submitted(
     order_id: int,
     user_id: int,
     file_id: str,
+    payment_method: Literal["card", "giveaway"],
 ) -> bool:
     with get_connection() as conn:
         cursor = conn.execute(
@@ -208,11 +210,18 @@ def mark_payment_submitted(
             WHERE id = ?
               AND user_id = ?
               AND status = 'pending'
-              AND payment_method = 'card'
+              AND payment_method = ?
               AND payment_submitted_at IS NULL
               AND expires_at > ?
             """,
-            (file_id, int(time.time()), order_id, user_id, int(time.time())),
+            (
+                file_id,
+                int(time.time()),
+                order_id,
+                user_id,
+                payment_method,
+                int(time.time()),
+            ),
         )
         return cursor.rowcount == 1
 

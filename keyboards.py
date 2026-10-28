@@ -1,4 +1,5 @@
 
+from aiogram.types import ForceReply
 from aiogram.utils.keyboard import (
     ReplyKeyboardBuilder,
     InlineKeyboardMarkup,
@@ -96,6 +97,12 @@ def payment_method_kb():
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить картой", callback_data="pin_pay_card")],
             [InlineKeyboardButton(text="⭐️ Оплатить Telegram Stars", callback_data="pin_pay_stars")],
+            [
+                InlineKeyboardButton(
+                    text="🏆 Победитель розыгрыша",
+                    callback_data="pin_pay_giveaway",
+                )
+            ],
             [InlineKeyboardButton(text="❌ Отменить заказ", callback_data="cancel_pin_selection")],
         ]
     )
@@ -111,12 +118,35 @@ def post_preview_keyboard():
     )
 
 
+def post_review_keyboard(submission_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Одобрить",
+                    callback_data=f"post_review:approve:{submission_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"post_review:reject:{submission_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def rejection_reason_reply():
+    return ForceReply(
+        input_field_placeholder="Причина отказа",
+    )
+
+
 def cancel_payment_kb(order_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="❌ Отменить оплату",
+                    text="❌ Отменить заказ",
                     callback_data=f"cancel_payment:{order_id}",
                 )
             ]

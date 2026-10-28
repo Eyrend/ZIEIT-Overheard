@@ -22,7 +22,7 @@ WORKBOOK_PATH = ARCHIVE_DIR / "payments.xlsx"
 HEADERS = [
     "ID заказа",
     "Дата создания (Киев)",
-    "Дата оплаты/чека (Киев)",
+    "Дата оплаты / подтверждения (Киев)",
     "Telegram ID",
     "Имя пользователя",
     "Username",
@@ -31,7 +31,7 @@ HEADERS = [
     "Сумма, Stars",
     "Способ оплаты",
     "Статус заказа",
-    "Чек",
+    "Чек / скриншот победы",
     "Telegram charge ID",
 ]
 
@@ -65,7 +65,12 @@ async def _save_receipt(bot: Bot, order: dict) -> tuple[str, str | None]:
         RECEIPTS_DIR.mkdir(parents=True, exist_ok=True)
         receipt_path = RECEIPTS_DIR / f"order_{order['id']}{extension}"
         await bot.download_file(telegram_file.file_path, destination=receipt_path)
-        return "Открыть чек", receipt_path.relative_to(ARCHIVE_DIR).as_posix()
+        proof_label = (
+            "Открыть скриншот победы"
+            if order.get("payment_method") == "giveaway"
+            else "Открыть чек"
+        )
+        return proof_label, receipt_path.relative_to(ARCHIVE_DIR).as_posix()
     except Exception:
         logger.exception("Could not download receipt for order %s", order["id"])
         return f"Telegram file ID: {file_id}", None
@@ -107,6 +112,7 @@ async def archive_payment_orders(bot: Bot, orders: list[dict]) -> None:
         payment_method = {
             "card": "Карта / IBAN",
             "stars": "Telegram Stars",
+            "giveaway": "Победитель розыгрыша",
         }.get(order.get("payment_method"), order.get("payment_method", "Неизвестно"))
         row = [
             order_id,

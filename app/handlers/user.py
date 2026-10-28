@@ -1,3 +1,6 @@
+import logging
+import json
+
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import CallbackQuery, Message
@@ -10,13 +13,19 @@ from keyboards import (
     ideas_and_listings_keyboard,
     main_keyboard,
     post_preview_keyboard,
+    post_review_keyboard,
     privilege_keyboard,
     return_to_menu_keyboard,
     set_time_kb,
 )
 from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT, MORE, REFUND
 from config import MODERATION_GROUP_ID
-from sqlwork.support import save_moderation_post, save_support_request
+from sqlwork.support import (
+    create_post_submission,
+    save_moderation_post,
+    save_post_review_message,
+    save_support_request,
+)
 from sqlwork.orders import cancel_pin_order, get_pin_order, update_pin_order_post
 from sqlwork.user import get_birthday_user, set_user_birthday
 from utils.birthdays import (
@@ -31,6 +40,7 @@ from utils.birthdays import (
     parse_birthday_date,
 )
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 @router.message(F.text == MAIN_MENU_BUTTON, F.chat.type == "private")
@@ -48,8 +58,8 @@ async def return_to_main_menu(message: Message, state: FSMContext):
         ):
             if not cancel_pin_order(order_id):
                 await message.answer(
-                    "Не удалось отменить ожидающий оплаты заказ. "
-                    "Используй кнопку отмены под сообщением об оплате."
+                    "Не удалось отменить ожидающий заказ. "
+                    "Используй кнопку отмены под сообщением заказа."
                 )
                 return
             from payment_init import stop_payment_countdown
@@ -125,7 +135,7 @@ async def send_birthday_reminder_to_moderators(user, bot: Bot) -> int | None:
     else:
         birthday_age = calculate_age(birthday)
     username = f"@{user['username']}" if user["username"] else "отсутствует"
-    await bot.send_message(
+    moderation_card = await bot.send_message(
         chat_id=MODERATION_GROUP_ID,
         text=(
             "📣 Пользователь напомнил о своём дне рождения\n\n"
@@ -213,7 +223,10 @@ async def receive_post(message: Message, state: FSMContext, bot: Bot):
             or order["status"] != "pending"
             or order["payment_submitted_at"] is None
         ):
-            await message.answer("Не удалось найти оплаченный заказ. Обратись в поддержку.")
+            await message.answer(
+                "Не удалось найти заказ с подтверждённой оплатой или победой. "
+                "Обратись в поддержку."
+            )
             await state.clear()
             return
 
@@ -227,6 +240,12 @@ async def receive_post(message: Message, state: FSMContext, bot: Bot):
         preview_chat_id=message.chat.id,
         preview_message_id=preview.message_id,
         preview_source_message_id=message.message_id,
+        post_text=message.text or message.caption,
+        post_entities=[
+            entity.model_dump(mode="json", exclude_none=True)
+            for entity in (message.entities or message.caption_entities or [])
+        ],
+        post_content_type=message.content_type,
     )
     await state.set_state(PostStates.post_preview)
     await message.answer(
@@ -272,7 +291,16 @@ async def handle_post_preview(
         if isinstance(order_id, int):
             order = get_pin_order(order_id)
             if order is not None and order["payment_submitted_at"] is not None:
-                notice += " Оплата не возвращается автоматически; по вопросам напиши в поддержку."
+                if order["payment_method"] == "giveaway":
+                    notice += (
+                        " Заказ с подтверждением победы не отменяется автоматически; "
+                        "по вопросам напиши в поддержку."
+                    )
+                else:
+                    notice += (
+                        " Оплата не возвращается автоматически; "
+                        "по вопросам напиши в поддержку."
+                    )
         await state.clear()
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(notice, reply_markup=main_keyboard())
@@ -294,23 +322,8 @@ async def handle_post_preview(
     username = f"@{data['username']}" if data.get("username") else "None"
     anonymous = "Да" if data.get("anonymous", False) else "Нет"
 
-    if order_id is None:
-        moderation_card = await bot.send_message(
-            chat_id=MODERATION_GROUP_ID,
-            text=RECIEVED_POST.format(
-                user_id=user_id,
-                username=username,
-                anonymous=anonymous,
-            ),
-        )
-        forwarded_post = await bot.forward_message(
-            chat_id=MODERATION_GROUP_ID,
-            from_chat_id=source_chat_id,
-            message_id=source_message_id,
-        )
-        save_moderation_post(moderation_card.message_id, user_id)
-        save_moderation_post(forwarded_post.message_id, user_id)
-    else:
+    order = None
+    if order_id is not None:
         order = get_pin_order(order_id) if isinstance(order_id, int) else None
         if (
             order is None
@@ -318,7 +331,10 @@ async def handle_post_preview(
             or order["status"] != "pending"
             or order["payment_submitted_at"] is None
         ):
-            await callback.answer("Не удалось найти оплаченный заказ.", show_alert=True)
+            await callback.answer(
+                "Не удалось найти заказ с подтверждённой оплатой или победой.",
+                show_alert=True,
+            )
             return
         if not update_pin_order_post(
             order_id=order_id,
@@ -329,7 +345,18 @@ async def handle_post_preview(
             await callback.answer("Не удалось сохранить пост для заказа.", show_alert=True)
             return
 
-        try:
+    try:
+        if order is None:
+            moderation_card = await bot.send_message(
+                chat_id=MODERATION_GROUP_ID,
+                text=RECIEVED_POST.format(
+                    user_id=user_id,
+                    username=username,
+                    anonymous=anonymous,
+                ),
+            )
+        else:
+            is_giveaway = order["payment_method"] == "giveaway"
             stars_payment_text = (
                 f"⭐️ Оплачено: {order['stars_amount']} Stars\n"
                 if order["payment_method"] == "stars"
@@ -338,50 +365,101 @@ async def handle_post_preview(
             payment_status_text = (
                 "💳 ОПЛАТА: ПОДТВЕРЖДЕНА TELEGRAM STARS\n"
                 if order["payment_method"] == "stars"
-                else "💳 ОПЛАТА: ОЖИДАЕТ ПРОВЕРКИ\n"
+                else (
+                    "🏆 ПОБЕДА В РОЗЫГРЫШЕ: ОЖИДАЕТ ПРОВЕРКИ\n"
+                    if is_giveaway
+                    else "💳 ОПЛАТА: ОЖИДАЕТ ПРОВЕРКИ\n"
+                )
             )
-            await bot.send_message(
+            amount_text = (
+                "🎁 Стоимость: бесплатно (победитель розыгрыша)\n"
+                if is_giveaway
+                else f"💰 Сумма: {order['amount']} грн\n"
+            )
+            moderator_note = {
+                "giveaway": "Проверьте скриншот выигрыша и содержание поста.",
+                "stars": "Оплата Telegram Stars подтверждена автоматически. "
+                "Проверьте содержание поста.",
+                "card": "Проверьте поступление денег и содержание поста. "
+                "Скриншот сам по себе не подтверждает оплату.",
+            }[order["payment_method"]]
+            moderation_card = await bot.send_message(
                 chat_id=MODERATION_GROUP_ID,
                 text=(
                     "📥 НОВЫЙ ПОСТ НА МОДЕРАЦИЮ\n\n"
                     f"👤 ID пользователя: {user_id}\n"
                     f"🔗 Username: {username}\n"
                     f"🧾 Номер заказа: №{order_id}\n"
-                    f"💰 Сумма: {order['amount']} грн\n"
+                    f"{amount_text}"
                     f"{stars_payment_text}"
                     f"⏱ Срок закрепления: {order['hours']} ч.\n\n"
                     "📌 ЗАКРЕП: ДА\n"
                     f"{payment_status_text}"
                     f"🕶️ АНОНИМНО: {anonymous.upper()}\n\n"
-                    "Проверьте поступление денег и содержание поста. "
-                    "Скриншот сам по себе не подтверждает оплату."
+                    f"{moderator_note}"
                 ),
             )
-            if order["payment_method"] == "card":
+            if order["payment_method"] in {"card", "giveaway"}:
                 await bot.send_photo(
                     chat_id=MODERATION_GROUP_ID,
                     photo=order["payment_proof_file_id"],
-                    caption=f"🧾 Чек по заказу №{order_id}",
+                    caption=(
+                        f"🏆 Скриншот победы по заказу №{order_id}"
+                        if is_giveaway
+                        else f"🧾 Чек по заказу №{order_id}"
+                    ),
                 )
-            forwarded_post = await bot.forward_message(
-                chat_id=MODERATION_GROUP_ID,
-                from_chat_id=source_chat_id,
-                message_id=source_message_id,
-            )
-        except Exception:
-            await callback.message.answer(
-                "Не удалось передать пост и чек модераторам. "
-                "Попробуй отправить публикацию ещё раз."
-            )
-            await callback.answer()
-            return
-
+        save_moderation_post(moderation_card.message_id, user_id)
+        forwarded_post = await bot.forward_message(
+            chat_id=MODERATION_GROUP_ID,
+            from_chat_id=source_chat_id,
+            message_id=source_message_id,
+        )
         save_moderation_post(forwarded_post.message_id, user_id)
+        submission_id = create_post_submission(
+            user_id=user_id,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            post_text=data.get("post_text"),
+            post_entities=data.get("post_entities", []),
+            post_content_type=data.get("post_content_type", "unknown"),
+            anonymous=bool(data.get("anonymous", False)),
+            author_label=(
+                f"@{data['username']}"
+                if data.get("username")
+                else callback.from_user.full_name
+            ),
+            order_id=order_id if isinstance(order_id, int) else None,
+            pin_hours=order["hours"] if order is not None else None,
+        )
+        review_message = await bot.send_message(
+            chat_id=MODERATION_GROUP_ID,
+            text=(
+                f"🗳 Заявка №{submission_id} ожидает решения.\n"
+                "Одобрить публикацию в канал или отклонить её."
+            ),
+            reply_markup=post_review_keyboard(submission_id),
+        )
+        if not save_post_review_message(
+            submission_id,
+            review_message.message_id,
+        ):
+            raise RuntimeError(
+                f"Could not save review message for submission {submission_id}"
+            )
+    except Exception:
+        logger.exception("Could not send post submission %s to moderation", order_id)
+        await callback.message.answer(
+            "Не удалось передать заявку модераторам. "
+            "Попробуй отправить публикацию ещё раз."
+        )
+        await callback.answer()
+        return
 
     await state.clear()
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "✅ Пост и чек отправлены на модерацию!" if order_id is not None
+        "✅ Пост и подтверждение отправлены на модерацию!" if order_id is not None
         else "✅ Пост отправлен на модерацию!",
         reply_markup=main_keyboard(),
     )

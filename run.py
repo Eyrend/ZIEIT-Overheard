@@ -9,6 +9,7 @@ from sqlwork.orders import init_orders_table
 from sqlwork.support import init_support_tables
 from utils.payment_archive import run_daily_payment_archive
 from utils.birthdays import run_daily_birthday_notifications
+from utils.post_publication import run_post_unpin_scheduler
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -22,12 +23,19 @@ async def main():
     dp.include_router(router)
     archive_task = asyncio.create_task(run_daily_payment_archive(bot, dp))
     birthday_task = asyncio.create_task(run_daily_birthday_notifications(bot))
+    post_unpin_task = asyncio.create_task(run_post_unpin_scheduler(bot))
     try:
         await dp.start_polling(bot)
     finally:
         archive_task.cancel()
         birthday_task.cancel()
-        await asyncio.gather(archive_task, birthday_task, return_exceptions=True)
+        post_unpin_task.cancel()
+        await asyncio.gather(
+            archive_task,
+            birthday_task,
+            post_unpin_task,
+            return_exceptions=True,
+        )
 
 if __name__ == '__main__':
     asyncio.run(main())
