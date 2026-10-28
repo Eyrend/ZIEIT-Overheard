@@ -6,6 +6,7 @@ from fsm import PostStates
 from keyboards import (
     MAIN_MENU_BUTTON,
     anonymity_keyboard,
+    birthday_input_keyboard,
     ideas_and_listings_keyboard,
     main_keyboard,
     post_preview_keyboard,
@@ -17,8 +18,18 @@ from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT, MORE, RE
 from config import MODERATION_GROUP_ID
 from sqlwork.support import save_moderation_post, save_support_request
 from sqlwork.orders import cancel_pin_order, get_pin_order, update_pin_order_post
-from sqlwork.user import set_user_birthday
-from utils.birthdays import current_kyiv_date, parse_birthday_date
+from sqlwork.user import get_birthday_user, set_user_birthday
+from utils.birthdays import (
+    age_at_next_birthday,
+    birthday_reminder_offset,
+    calculate_age,
+    current_kyiv_date,
+    format_birthday_countdown,
+    format_days_remaining,
+    format_stored_birthday,
+    format_years,
+    parse_birthday_date,
+)
 router = Router()
 
 
@@ -63,6 +74,114 @@ async def welcome(
     
     await message.answer(WELCOME_MESSAGE.format(name=message.from_user.first_name),
                          reply_markup=main_keyboard())
+
+
+@router.message(F.text == "Дата рождения 🎂", F.chat.type == "private")
+async def ask_for_birthday(message: Message, state: FSMContext):
+    await state.clear()
+    existing_birthday = get_birthday_user(message.from_user.id)
+    if existing_birthday is None:
+        personal_status = "Дата рождения пока не указана."
+    else:
+        birthday = parse_birthday_date(
+            format_stored_birthday(existing_birthday["birthday"])
+        )
+        if birthday is None:
+            personal_status = "Дата рождения уже указана, но её не удалось прочитать."
+        else:
+            personal_status = (
+                f"Сейчас указана дата: {birthday.strftime('%d.%m.%Y')}.\n"
+                f"Возраст: {format_years(calculate_age(birthday))}.\n"
+                f"{format_birthday_countdown(birthday)}"
+            )
+
+    await message.answer(
+        "🎂 Укажи дату рождения — в этот день тебя поздравят в канале, "
+        "а бот заранее напомнит о празднике. Дату увидит администрация, "
+        "чтобы подготовить поздравление."
+    )
+    await state.set_state(PostStates.waiting_for_birthday)
+    await message.answer(
+        f"{personal_status}\n\n"
+        "Чтобы указать или изменить дату, отправь её в формате ДД.ММ.ГГГГ, "
+        "например: 05.11.2004.\n"
+        "Напомнить модераторам можно за день до дня рождения, в сам день "
+        "и на следующий день.",
+        reply_markup=birthday_input_keyboard(),
+    )
+
+
+async def send_birthday_reminder_to_moderators(user, bot: Bot) -> int | None:
+    birthday = parse_birthday_date(format_stored_birthday(user["birthday"]))
+    if birthday is None:
+        return None
+
+    reminder_offset = birthday_reminder_offset(birthday)
+    if reminder_offset not in {-1, 0, 1}:
+        return reminder_offset
+
+    if reminder_offset == 1:
+        birthday_age = age_at_next_birthday(birthday)
+    else:
+        birthday_age = calculate_age(birthday)
+    username = f"@{user['username']}" if user["username"] else "отсутствует"
+    await bot.send_message(
+        chat_id=MODERATION_GROUP_ID,
+        text=(
+            "📣 Пользователь напомнил о своём дне рождения\n\n"
+            f"👤 Имя: {user['name'] or 'Без имени'}\n"
+            f"🆔 Telegram ID: {user['telegram_id']}\n"
+            f"🔗 Username: {username}\n"
+            f"📅 Дата рождения: {birthday.strftime('%d.%m.%Y')}\n"
+            f"🎉 Возраст: {format_years(birthday_age)}"
+        ),
+    )
+    return reminder_offset
+
+
+def birthday_reminder_response(reminder_offset: int) -> str:
+    if reminder_offset == 1:
+        return "✅ Напоминание отправлено модераторам: день рождения завтра."
+    if reminder_offset == 0:
+        return "✅ Напоминание отправлено модераторам: сегодня день рождения."
+    if reminder_offset == -1:
+        return "✅ Напоминание отправлено модераторам: день рождения был вчера."
+    return (
+        f"{format_days_remaining(reminder_offset)} "
+        "Напоминание модераторам можно отправить за день до ДР, в сам день "
+        "или на следующий день."
+    )
+
+
+@router.message(
+    F.text == "📣 Напомнить модераторам",
+    F.chat.type == "private",
+)
+async def remind_moderators_about_birthday_message(
+    message: Message,
+    bot: Bot,
+):
+    user = get_birthday_user(message.from_user.id)
+    if user is None:
+        await message.answer(
+            "Сначала укажи дату рождения. Отправь её в формате ДД.ММ.ГГГГ "
+            "или нажми «🏠 В главное меню»."
+        )
+        return
+
+    days_until_birthday = await send_birthday_reminder_to_moderators(user, bot)
+    if days_until_birthday is None:
+        await message.answer(
+            "Не удалось прочитать дату рождения. Укажи её заново в формате ДД.ММ.ГГГГ."
+        )
+        return
+
+    await message.answer(
+        f"{birthday_reminder_response(days_until_birthday)} "
+        "Можешь указать или изменить дату рождения.",
+        reply_markup=birthday_input_keyboard(),
+    )
+
 
 # Хэндлер Предложить пост 🗒️
 @router.message(F.text == 'Предложить пост 🗒️', F.chat.type =='private')
@@ -326,16 +445,6 @@ async def send_more(message: Message):
     await message.answer(REFUND)
 
 
-@router.message(F.text == "Указать дату рождения 🎂", F.chat.type == "private")
-async def ask_for_birthday(message: Message, state: FSMContext):
-    await state.set_state(PostStates.waiting_for_birthday)
-    await message.answer(
-        "Отправь дату рождения в формате ДД.ММ.ГГГГ, например: 05.11.2004.\n"
-        "Чтобы отменить, нажми кнопку главного меню.",
-        reply_markup=return_to_menu_keyboard(),
-    )
-
-
 @router.message(PostStates.waiting_for_birthday, F.chat.type == "private")
 async def save_birthday(message: Message, state: FSMContext):
     text = (message.text or "").strip()
@@ -365,7 +474,8 @@ async def save_birthday(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ Дата рождения сохранена: {birthday.strftime('%d.%m.%Y')}.",
+        f"✅ Дата рождения сохранена: {birthday.strftime('%d.%m.%Y')}.\n"
+        f"{format_birthday_countdown(birthday)}",
         reply_markup=main_keyboard(),
     )
 

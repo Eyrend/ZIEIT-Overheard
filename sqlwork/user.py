@@ -113,6 +113,7 @@ def set_user_birthday(telegram_id, birthday, name=None, username=None):
             """
             UPDATE users
             SET birthday = ?, birthday_notified_on = NULL,
+                birthday_reminded_on = NULL,
                 name = COALESCE(?, name), username = ?
             WHERE telegram_id = ?
             """,
@@ -160,7 +161,8 @@ def delete_user_birthday(telegram_id):
         cursor = conn.execute(
             """
             UPDATE users
-            SET birthday = NULL, birthday_notified_on = NULL
+            SET birthday = NULL, birthday_notified_on = NULL,
+                birthday_reminded_on = NULL
             WHERE telegram_id = ? AND birthday IS NOT NULL
             """,
             (telegram_id,),
@@ -188,6 +190,32 @@ def mark_birthday_notified(telegram_id, today):
             """
             UPDATE users
             SET birthday_notified_on = ?
+            WHERE telegram_id = ? AND birthday IS NOT NULL
+            """,
+            (today.isoformat(), telegram_id),
+        )
+
+
+def get_unnotified_birthday_reminders(tomorrow, today):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT telegram_id, birthday
+            FROM users
+            WHERE strftime('%m-%d', birthday) = ?
+                AND (birthday_reminded_on IS NULL OR birthday_reminded_on != ?)
+            ORDER BY telegram_id
+            """,
+            (tomorrow.strftime("%m-%d"), today.isoformat()),
+        ).fetchall()
+
+
+def mark_birthday_reminded(telegram_id, today):
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET birthday_reminded_on = ?
             WHERE telegram_id = ? AND birthday IS NOT NULL
             """,
             (today.isoformat(), telegram_id),

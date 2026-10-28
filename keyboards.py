@@ -46,6 +46,14 @@ def return_to_menu_keyboard():
     return keyboard.as_markup(resize_keyboard=True)
 
 
+def birthday_input_keyboard():
+    keyboard = ReplyKeyboardBuilder()
+    keyboard.button(text="📣 Напомнить модераторам")
+    keyboard.button(text=MAIN_MENU_BUTTON)
+    keyboard.adjust(1)
+    return keyboard.as_markup(resize_keyboard=True)
+
+
 def privilege_keyboard():
     keyboard = ReplyKeyboardBuilder()
     keyboard.button(text="Закрепить 📌")

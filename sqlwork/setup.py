@@ -45,6 +45,7 @@ def add_ban_reason_column():
             "mute_reason": "TEXT",
             "birthday": "TEXT",
             "birthday_notified_on": "TEXT",
+            "birthday_reminded_on": "TEXT",
             "created_at": "INTEGER",
         }
         for column, definition in new_columns.items():
