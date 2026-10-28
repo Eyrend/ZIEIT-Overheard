@@ -57,6 +57,8 @@ def init_support_tables():
                 rejection_reason TEXT,
                 channel_message_id INTEGER,
                 unpin_at INTEGER,
+                pinned_at INTEGER,
+                pin_retry_at INTEGER,
                 unpinned_at INTEGER,
                 created_at INTEGER NOT NULL
             )
@@ -72,11 +74,25 @@ def init_support_tables():
             ("post_text", "TEXT"),
             ("post_entities", "TEXT"),
             ("post_content_type", "TEXT"),
+            ("pinned_at", "INTEGER"),
+            ("pin_retry_at", "INTEGER"),
         ):
             if column not in columns:
                 conn.execute(
                     f"ALTER TABLE post_submissions ADD COLUMN {column} {column_type}"
                 )
+                if column == "pinned_at":
+                    conn.execute(
+                        """
+                        UPDATE post_submissions
+                        SET pinned_at = created_at
+                        WHERE status = 'approved'
+                          AND pin_hours IS NOT NULL
+                          AND channel_message_id IS NOT NULL
+                          AND unpin_at IS NOT NULL
+                          AND unpinned_at IS NULL
+                        """
+                    )
 
 
 def save_support_request(group_message_id: int, user_id: int):
@@ -314,12 +330,61 @@ def get_post_submissions_due_for_unpin(now: int | None = None):
             WHERE status = 'approved'
               AND pin_hours IS NOT NULL
               AND channel_message_id IS NOT NULL
+              AND pinned_at IS NOT NULL
               AND unpin_at <= ?
               AND unpinned_at IS NULL
             """,
             (current_time,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_post_submissions_due_for_pin(now: int | None = None):
+    current_time = int(time.time()) if now is None else now
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, channel_message_id
+            FROM post_submissions
+            WHERE status = 'approved'
+              AND pin_hours IS NOT NULL
+              AND channel_message_id IS NOT NULL
+              AND pinned_at IS NULL
+              AND unpin_at > ?
+              AND (pin_retry_at IS NULL OR pin_retry_at <= ?)
+              AND unpinned_at IS NULL
+            """,
+            (current_time, current_time),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def mark_post_submission_pinned(submission_id: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE post_submissions
+            SET pinned_at = ?, pin_retry_at = NULL
+            WHERE id = ? AND status = 'approved'
+              AND pinned_at IS NULL AND unpinned_at IS NULL
+            """,
+            (int(time.time()), submission_id),
+        )
+        return cursor.rowcount == 1
+
+
+def postpone_post_submission_pin(submission_id: int, retry_at: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE post_submissions
+            SET pin_retry_at = ?
+            WHERE id = ? AND status = 'approved'
+              AND pinned_at IS NULL AND unpinned_at IS NULL
+            """,
+            (retry_at, submission_id),
+        )
+        return cursor.rowcount == 1
 
 
 def mark_post_submission_unpinned(submission_id: int) -> bool:

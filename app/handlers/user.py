@@ -345,8 +345,10 @@ async def handle_post_preview(
             await callback.answer("Не удалось сохранить пост для заказа.", show_alert=True)
             return
 
+    failure_stage = "подготовка карточки"
     try:
         if order is None:
+            failure_stage = "отправка карточки модераторам"
             moderation_card = await bot.send_message(
                 chat_id=MODERATION_GROUP_ID,
                 text=RECIEVED_POST.format(
@@ -383,6 +385,7 @@ async def handle_post_preview(
                 "card": "Проверьте поступление денег и содержание поста. "
                 "Скриншот сам по себе не подтверждает оплату.",
             }[order["payment_method"]]
+            failure_stage = "отправка карточки заказа модераторам"
             moderation_card = await bot.send_message(
                 chat_id=MODERATION_GROUP_ID,
                 text=(
@@ -400,6 +403,7 @@ async def handle_post_preview(
                 ),
             )
             if order["payment_method"] in {"card", "giveaway"}:
+                failure_stage = "отправка чека/скриншота модераторам"
                 await bot.send_photo(
                     chat_id=MODERATION_GROUP_ID,
                     photo=order["payment_proof_file_id"],
@@ -409,13 +413,17 @@ async def handle_post_preview(
                         else f"🧾 Чек по заказу №{order_id}"
                     ),
                 )
+        failure_stage = "сохранение карточки модерации"
         save_moderation_post(moderation_card.message_id, user_id)
+        failure_stage = "пересылка поста модераторам"
         forwarded_post = await bot.forward_message(
             chat_id=MODERATION_GROUP_ID,
             from_chat_id=source_chat_id,
             message_id=source_message_id,
         )
+        failure_stage = "сохранение пересланного поста"
         save_moderation_post(forwarded_post.message_id, user_id)
+        failure_stage = "сохранение заявки"
         submission_id = create_post_submission(
             user_id=user_id,
             source_chat_id=source_chat_id,
@@ -432,6 +440,7 @@ async def handle_post_preview(
             order_id=order_id if isinstance(order_id, int) else None,
             pin_hours=order["hours"] if order is not None else None,
         )
+        failure_stage = "отправка кнопок модерации"
         review_message = await bot.send_message(
             chat_id=MODERATION_GROUP_ID,
             text=(
@@ -440,6 +449,7 @@ async def handle_post_preview(
             ),
             reply_markup=post_review_keyboard(submission_id),
         )
+        failure_stage = "сохранение сообщения с кнопками модерации"
         if not save_post_review_message(
             submission_id,
             review_message.message_id,
@@ -447,10 +457,19 @@ async def handle_post_preview(
             raise RuntimeError(
                 f"Could not save review message for submission {submission_id}"
             )
-    except Exception:
-        logger.exception("Could not send post submission %s to moderation", order_id)
+    except Exception as error:
+        logger.exception(
+            "Could not send post submission %s to moderation at stage %s "
+            "(moderation_chat_id=%s)",
+            order_id,
+            failure_stage,
+            MODERATION_GROUP_ID,
+        )
+        error_detail = " ".join(str(error).split())[:240]
         await callback.message.answer(
-            "Не удалось передать заявку модераторам. "
+            f"Не удалось передать заявку модераторам на этапе «{failure_stage}». "
+            f"Ошибка: {type(error).__name__}"
+            f"{f' — {error_detail}' if error_detail else ''}.\n"
             "Попробуй отправить публикацию ещё раз."
         )
         await callback.answer()

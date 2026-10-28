@@ -31,9 +31,11 @@ from sqlwork.support import (
     get_support_answer,
     get_moderation_post_user,
     get_post_submission_by_rejection_prompt,
+    mark_post_submission_pinned,
     mark_post_submission_published,
     mark_post_submission_rejected,
     mark_post_submission_unpinned,
+    postpone_post_submission_pin,
     restore_post_submission_pending,
     save_post_rejection_prompt,
     get_support_user,
@@ -59,7 +61,6 @@ from sqlwork.user import (
 from config import (
     ADMIN_IDS,
     MODERATION_GROUP_ID,
-    MODERATION_GROUP_USERNAME,
     PUBLISH_CHANNEL_ID,
 )
 from sqlwork.orders import get_pin_order_statistics
@@ -73,6 +74,16 @@ from utils.duration import parse_duration
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+@router.message(Command("chatid"))
+async def show_chat_id(message: Message, is_admin: bool):
+    if not is_admin:
+        return
+    await message.answer(
+        f"ID этого чата: <code>{message.chat.id}</code>",
+        parse_mode="HTML",
+    )
 
 
 def _utf16_length(value: str) -> int:
@@ -135,7 +146,7 @@ def _post_with_author_quote(submission: dict) -> tuple[str, list[MessageEntity]]
 
 @router.message(
     Command("moderation", "mod"),
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
 )
 async def show_moderation_panel(message: Message, is_admin: bool):
     if not is_admin:
@@ -206,7 +217,7 @@ async def review_post_submission(
         return
     if (
         callback.message is None
-        or callback.message.chat.username != MODERATION_GROUP_USERNAME
+        or callback.message.chat.id != MODERATION_GROUP_ID
     ):
         await callback.answer("Кнопки работают только в чате модерации.", show_alert=True)
         return
@@ -328,9 +339,18 @@ async def review_post_submission(
         except Exception:
             follow_up_errors.append("не удалось закрепить пост")
             logger.exception("Could not pin submission %s", submission_id)
-            if not mark_post_submission_unpinned(submission_id):
+            if not postpone_post_submission_pin(
+                submission_id,
+                int(time.time()) + 600,
+            ):
                 logger.error(
-                    "Could not mark failed pin as complete for submission %s",
+                    "Could not schedule pin retry for submission %s",
+                    submission_id,
+                )
+        else:
+            if not mark_post_submission_pinned(submission_id):
+                logger.error(
+                    "Could not record pin for submission %s",
                     submission_id,
                 )
 
@@ -352,7 +372,7 @@ async def review_post_submission(
 
 
 @router.message(
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
     F.reply_to_message,
     F.reply_to_message.message_id.func(
         lambda message_id: (
@@ -431,7 +451,7 @@ async def choose_moderation_action(
 
     if (
         callback.message is None
-        or callback.message.chat.username != MODERATION_GROUP_USERNAME
+        or callback.message.chat.id != MODERATION_GROUP_ID
     ):
         await callback.answer("Панель работает только в группе модерации.", show_alert=True)
         return
@@ -476,7 +496,7 @@ async def manage_birthdays(callback: CallbackQuery, state: FSMContext):
         return
     if (
         callback.message is None
-        or callback.message.chat.username != MODERATION_GROUP_USERNAME
+        or callback.message.chat.id != MODERATION_GROUP_ID
     ):
         await callback.answer("Раздел работает только в группе модерации.", show_alert=True)
         return
@@ -557,7 +577,7 @@ async def manage_birthdays(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
     PostStates.moderation_birthday_edit,
 )
 async def edit_user_birthday(message: Message, state: FSMContext, is_admin: bool):
@@ -605,7 +625,7 @@ async def edit_user_birthday(message: Message, state: FSMContext, is_admin: bool
 
 
 @router.message(
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
     PostStates.moderation_target,
 )
 async def apply_moderation_action(
@@ -732,7 +752,7 @@ async def apply_moderation_action(
 
 
 @router.message(
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
     F.reply_to_message,
     F.reply_to_message.forward_origin,
     F.text,
@@ -817,7 +837,7 @@ async def show_support_answer(callback: CallbackQuery):
 
 @router.message(
     Command("ban"),
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
 )
 async def ban_command(message: Message, bot: Bot, is_admin: bool):
     if not is_admin:
@@ -903,7 +923,7 @@ async def ban_command(message: Message, bot: Bot, is_admin: bool):
 
 @router.message(
     Command('unban'),
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
 )
 async def unban_command(message: Message, is_admin: bool, user):
     if not is_admin:
@@ -932,7 +952,7 @@ async def unban_command(message: Message, is_admin: bool, user):
 
 @router.message(
     Command("reply"),
-    F.chat.username == MODERATION_GROUP_USERNAME,
+    F.chat.id == MODERATION_GROUP_ID,
 )
 async def reply_to_user(message: Message, bot: Bot, is_admin: bool):
     if not is_admin:
