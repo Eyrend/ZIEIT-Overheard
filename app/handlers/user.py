@@ -15,10 +15,11 @@ from keyboards import (
     post_preview_keyboard,
     post_review_keyboard,
     privilege_keyboard,
+    project_support_method_kb,
     return_to_menu_keyboard,
     set_time_kb,
 )
-from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT, MORE, REFUND
+from message_text import WELCOME_MESSAGE, RECIEVED_POST, SET_TIME_TEXT, MORE
 from config import MODERATION_GROUP_ID
 from sqlwork.support import (
     create_post_submission,
@@ -531,16 +532,12 @@ async def pin_post(message: Message, state: FSMContext):
     await message.answer(
         text=SET_TIME_TEXT,
         reply_markup=set_time_kb(),
+        parse_mode="HTML",
     )
 
 @router.message(F.text == 'Подробнее 📲')
 async def send_more(message: Message):
     await message.answer(MORE)
-
-@router.message(F.text == 'Условия возврата ⛓️')
-async def send_more(message: Message):
-    await message.answer(REFUND)
-
 
 @router.message(PostStates.waiting_for_birthday, F.chat.type == "private")
 async def save_birthday(message: Message, state: FSMContext):
@@ -578,11 +575,22 @@ async def save_birthday(message: Message, state: FSMContext):
 
 
 @router.message(F.text == "Поддержка 🛟")
-async def support(message: Message, state: FSMContext):
+async def request_support(message: Message, state: FSMContext):
     await state.set_state(PostStates.support_message)
     await message.answer(
-        "🛟 Напиши своё обращение. Оно будет отправлено администрации.",
+        "🛟 Напиши сообщение для администрации — оно будет передано в поддержку.",
         reply_markup=return_to_menu_keyboard(),
+    )
+
+
+@router.message(F.text == "Поддержать проект 💙")
+async def support_project(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "💙 Поддержать проект — значит помочь «Подслушано» развиваться: добавлять удобные функции, "
+        "встречать новые истории и оставаться полезным для всей нашей шараги.\n\n"
+        "Можешь выбрать комфортную сумму. Любая поддержка очень важна!",
+        reply_markup=project_support_method_kb(),
     )
 
 

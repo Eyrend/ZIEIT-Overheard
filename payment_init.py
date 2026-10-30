@@ -22,8 +22,10 @@ from config import (
 )
 from keyboards import (
     cancel_payment_kb,
+    cancel_project_support_kb,
     main_keyboard,
     payment_method_kb,
+    project_support_method_kb,
     return_to_menu_keyboard,
 )
 from sqlwork.orders import (
@@ -171,8 +173,11 @@ async def choose_duration(
     )
     await state.set_state(PostStates.choosing_payment_method)
     await callback.message.answer(
-        f"Закреп на {hours} ч.\nВыбери способ оплаты:",
+        f"📌 <b>Бесплатный закреп на {hours} ч.</b>\n\n"
+        "🏆 Закреп доступен <b>ТОЛЬКО победителям розыгрыша</b>.\n"
+        "Подтверди свой статус победителя ниже:",
         reply_markup=payment_method_kb(),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -210,6 +215,8 @@ async def choose_card_payment(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+    await callback.answer("Оплаченный закреп больше недоступен. Закреп бесплатный только для победителей розыгрыша.", show_alert=True)
+    return
     order = await create_payment_order(callback, state, "card")
     if order is None:
         return
@@ -251,6 +258,8 @@ async def choose_stars_payment(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+    await callback.answer("Оплаченный закреп больше недоступен. Закреп бесплатный только для победителей розыгрыша.", show_alert=True)
+    return
     order = await create_payment_order(callback, state, "stars")
     if order is None:
         return
@@ -353,8 +362,134 @@ async def cancel_pin_selection(
     await callback.answer()
 
 
+@router.callback_query(F.data.in_({"support_home", "support_cancel"}))
+async def cancel_project_support(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    if callback.message is not None:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("Поддержка отменена.", reply_markup=main_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"support_card", "support_stars"}))
+async def choose_project_support_method(callback: CallbackQuery, state: FSMContext):
+    if callback.message is None:
+        return
+    method = "card" if callback.data == "support_card" else "stars"
+    await state.clear()
+    await state.update_data(support_method=method)
+    await state.set_state(PostStates.donation_amount)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if method == "card":
+        await callback.message.answer(
+            "💳 Введи сумму поддержки в гривнах цифрами:\nНапример: 50",
+            reply_markup=return_to_menu_keyboard(),
+        )
+    else:
+        await callback.message.answer(
+            "⭐️ Введи сумму поддержки в Telegram Stars цифрами:\nНапример: 100",
+            reply_markup=return_to_menu_keyboard(),
+        )
+    await callback.answer()
+
+
+@router.message(PostStates.donation_amount, F.text)
+async def enter_project_support_amount(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    method = data.get("support_method")
+    text = (message.text or "").strip().replace(" ", "")
+    if method == "card":
+        try:
+            amount = int(text)
+        except ValueError:
+            amount = 0
+        if amount < 1 or amount > 100000:
+            await message.answer("Введи сумму от 1 до 100000 гривен цифрами.")
+            return
+        await state.update_data(support_amount=amount)
+        await state.set_state(PostStates.donation_card_proof)
+        await message.answer(
+            f"💙 Спасибо за желание поддержать проект!\n\n"
+            f"Сумма поддержки: <b>{amount} грн</b>\n"
+            f"Получатель: {PAYMENT_RECIPIENT}\nIBAN:\n<code>{IBAN}</code>\n\n"
+            "После перевода отправь сюда скриншот или фото чека.",
+            reply_markup=cancel_project_support_kb(),
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        amount = int(text)
+    except ValueError:
+        amount = 0
+    if amount < 1 or amount > 100000:
+        await message.answer("Введи сумму от 1 до 100000 Stars цифрами.")
+        return
+    try:
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title="Поддержка проекта 💙",
+            description=f"Материальная поддержка проекта на сумму {amount} Stars",
+            payload=f"support_stars:{message.from_user.id}:{amount}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Поддержка проекта", amount=amount)],
+        )
+    except Exception:
+        await message.answer("Не удалось создать счёт Stars. Попробуй выбрать оплату картой.")
+        return
+    await state.clear()
+    await message.answer(
+        "Нажми кнопку оплаты под счётом выше. Спасибо за поддержку! 💙",
+        reply_markup=return_to_menu_keyboard(),
+    )
+
+
+@router.message(PostStates.donation_card_proof, F.photo)
+async def receive_project_support_card_proof(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    amount = data.get("support_amount")
+    if not isinstance(amount, int):
+        await state.clear()
+        await message.answer("Не удалось определить сумму поддержки. Начни заново.", reply_markup=main_keyboard())
+        return
+    user = message.from_user
+    await bot.send_message(
+        chat_id=MODERATION_GROUP_ID,
+        text=(
+            "💙 ПОДДЕРЖКА ПРОЕКТА\n\n"
+            f"👤 Пользователь: {user.full_name}\n"
+            f"🆔 Telegram ID: {user.id}\n"
+            f"🔗 Username: @{user.username if user.username else 'отсутствует'}\n"
+            f"💳 Тип оплаты: карта\n"
+            f"💰 Сумма: {amount} грн\n"
+            "🧾 Чек: ниже прикреплён скриншот"
+        ),
+    )
+    await bot.send_photo(chat_id=MODERATION_GROUP_ID, photo=message.photo[-1].file_id)
+    await state.clear()
+    await message.answer("✅ Чек отправлен администрации. Спасибо за поддержку проекта! 💙", reply_markup=main_keyboard())
+
+
+@router.message(PostStates.donation_card_proof)
+async def project_support_card_proof_required(message: Message):
+    await message.answer("Пришли фото или скриншот чека.")
+
+
 @router.pre_checkout_query()
 async def validate_stars_payment(query: PreCheckoutQuery):
+    support_match = re.fullmatch(r"support_stars:(\d+):(\d+)", query.invoice_payload)
+    if support_match:
+        user_id, amount = map(int, support_match.groups())
+        valid = (
+            query.from_user.id == user_id
+            and 1 <= amount <= 100000
+            and query.currency == "XTR"
+            and query.total_amount == amount
+        )
+        await query.answer(ok=valid, error_message=None if valid else "Сумма поддержки недействительна.")
+        return
+
     match = re.fullmatch(r"pin_order:(\d+)", query.invoice_payload)
     order = get_pin_order(int(match.group(1))) if match else None
     valid = (
@@ -380,6 +515,29 @@ async def receive_stars_payment(
     bot: Bot,
 ):
     payment = message.successful_payment
+    support_match = re.fullmatch(r"support_stars:(\d+):(\d+)", payment.invoice_payload)
+    if support_match:
+        user_id, amount = map(int, support_match.groups())
+        if message.from_user.id != user_id or payment.currency != "XTR" or payment.total_amount != amount:
+            await message.answer("Оплата получена, но данные поддержки не удалось проверить.")
+            return
+        user = message.from_user
+        await bot.send_message(
+            chat_id=MODERATION_GROUP_ID,
+            text=(
+                "💙 ПОДДЕРЖКА ПРОЕКТА\n\n"
+                f"👤 Пользователь: {user.full_name}\n"
+                f"🆔 Telegram ID: {user.id}\n"
+                f"🔗 Username: @{user.username if user.username else 'отсутствует'}\n"
+                f"⭐️ Тип оплаты: Telegram Stars\n"
+                f"💰 Сумма: {amount} Stars\n"
+                f"🧾 Charge ID: {payment.telegram_payment_charge_id}"
+            ),
+        )
+        await state.clear()
+        await message.answer("✅ Спасибо! Ваша поддержка получена — это очень помогает проекту 💙", reply_markup=main_keyboard())
+        return
+
     match = re.fullmatch(r"pin_order:(\d+)", payment.invoice_payload)
     order = get_pin_order(int(match.group(1))) if match else None
     if (

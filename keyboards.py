@@ -16,8 +16,8 @@ def main_keyboard():
     keyboard.button(text="Дата рождения 🎂")
     keyboard.button(text="Подробнее 📲")
     keyboard.button(text="Идеи и объявления 💡")
-    keyboard.button(text='Условия возврата ⛓️')
-    keyboard.button(text='Поддержка 🛟')
+    keyboard.button(text="Поддержать проект 💙")
+    keyboard.button(text="Поддержка 🛟")
     keyboard.adjust(1, 2, 2, 1)
     return keyboard.as_markup(resize_keyboard=True)
 
@@ -81,25 +81,36 @@ def set_time_kb():
     }
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{labels[key]} — {uah} грн / {stars}⭐️",
-                    callback_data=key,
-                )
-            ]
-            for key, (_, uah, stars) in PIN_OPTIONS.items()
+            [InlineKeyboardButton(text=f"📌 {labels[key]}", callback_data=key)]
+            for key in PIN_OPTIONS
         ]
+    )
+
+
+def project_support_method_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Картой", callback_data="support_card")],
+            [InlineKeyboardButton(text="⭐️ Telegram Stars", callback_data="support_stars")],
+            [InlineKeyboardButton(text="🏠 Вернуться в главное меню", callback_data="support_home")],
+        ]
+    )
+
+
+def cancel_project_support_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отменить и вернуться", callback_data="support_cancel")
+        ]]
     )
 
 
 def payment_method_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить картой", callback_data="pin_pay_card")],
-            [InlineKeyboardButton(text="⭐️ Оплатить Telegram Stars", callback_data="pin_pay_stars")],
             [
                 InlineKeyboardButton(
-                    text="🏆 Победитель розыгрыша",
+                    text="🏆 Я победитель розыгрыша",
                     callback_data="pin_pay_giveaway",
                 )
             ],

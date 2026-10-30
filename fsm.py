@@ -3,6 +3,8 @@ from aiogram.fsm.state import State, StatesGroup
 # Создание состояний кода 
 class PostStates(StatesGroup):
     support_message = State()
+    donation_amount = State()
+    donation_card_proof = State()
     waiting_for_post = State()
     choosing_anonymity = State()
     choosing_privilege = State()
